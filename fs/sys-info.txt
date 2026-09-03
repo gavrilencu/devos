@@ -1,0 +1,3 @@
+MyOS - sistem de operare x86-64 scris de la zero.
+Folderul "sys/" contine fisiere de sistem protejate:
+nu pot fi sterse sau redenumite.

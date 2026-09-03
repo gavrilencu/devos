@@ -1,0 +1,5 @@
+Idei pentru MyOS:
+- redimensionarea ferestrelor
+- mai multe teme de culori
+- un mic paint grafic
+- retea (ar fi ambitios!)

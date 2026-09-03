@@ -1,0 +1,7 @@
+Bun venit in folderul Documente al lui MyOS!
+
+Acesta e un folder virtual: MyFS e "plat", dar numele fisierelor
+pot contine "/" ca separator de cale. File Manager-ul le afiseaza
+ca foldere in care poti intra si din care poti iesi.
+
+Incearca sa creezi un fisier nou aici cu butonul "+ Nou".
