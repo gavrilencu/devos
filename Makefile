@@ -14,7 +14,8 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/gdt.o $(BUILD)/isr.o \
          $(BUILD)/tss.o $(BUILD)/syscall.o $(BUILD)/ata.o $(BUILD)/fs.o \
          $(BUILD)/elf.o $(BUILD)/pipe.o $(BUILD)/fb.o $(BUILD)/gui.o \
          $(BUILD)/mouse.o $(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/netstack.o \
-         $(BUILD)/tcp.o $(BUILD)/browser.o
+         $(BUILD)/tcp.o $(BUILD)/browser.o $(BUILD)/sha256.o $(BUILD)/aes.o \
+         $(BUILD)/x25519.o $(BUILD)/tls.o
 
 # Limite impuse de lantul de boot: stage1 citeste 192 de sectoare
 # (8 pentru stage2 + 184 pentru kernel).

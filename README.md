@@ -358,8 +358,22 @@ reboot — până la următorul `wsl make`, care regenerează imaginea.
       - verificat: browserul a adus și afișat `http://info.cern.ch` real de pe
         internet (878 octeți, cu linkuri), plus pagini HTTP locale
       - stage1 încarcă acum 384 sectoare (kernel până la ~188 KiB)
-- [ ] TLS/HTTPS: criptografie (X.509, RSA/ECDHE, AES-GCM, SHA-256) → site-uri
-      `https://` (ex. Google). Fundația de rețea e gata; urmează cripto.
+- [x] Milestone 36: **HTTPS / TLS 1.2 scris de la zero** (v0.36) — browserul
+      navighează și pe site-uri `https://`:
+      - **criptografie proprie**, verificată cu vectori de test cunoscuți:
+        `kernel/sha256.c` (SHA-256 + HMAC), `kernel/aes.c` (AES-128/256 + GCM),
+        `kernel/x25519.c` (Curve25519 ECDH)
+      - **`kernel/tls.c`**: client TLS 1.2 complet — ClientHello (cu SNI,
+        supported_groups x25519, signature_algorithms), ECDHE x25519,
+        AES-128-GCM, PRF (P_SHA256), ChangeCipherSpec + Finished; rulează peste
+        clientul TCP, pe firul de kernel al browserului. **Nu** validează
+        certificatul (OS de învățare, nu pentru securitate reală)
+      - bara de adresă editabilă complet: click = pui cursorul unde vrei,
+        insert/Delete/Home/End/săgeți, derulare orizontală
+      - verificat: `https://example.com` afișat corect (828 octeți prin TLS);
+        `https://www.google.com` — handshake TLS reușit, 22 KB descărcați și
+        decriptați (dar pagina e 99% JavaScript, deci nu se randează vizual)
+- [ ] Motor de randare mai bogat (imagini, tabele, CSS de bază)
 - [ ] SSH: schimb de chei Diffie-Hellman + cifru, peste TCP
 - [ ] Higher-half kernel
 

@@ -8,9 +8,13 @@ UDP/TCP), DNS, server telnet SI client TCP outbound. Iese pe internet!
     telnet <gazda> [port]  (client, Ctrl+Q iese),  fetch <gazda> [cale]  (HTTP).
 
 BROWSER WEB (Alt+F7 sau butonul cu glob din taskbar): scrie o adresa in bara
-de sus si apasa Enter, sau click pe un link. Are inapoi/inainte/reload, istoric,
+de sus si apasa Enter, sau click pe un link. Merge HTTP si HTTPS (TLS 1.2 scris
+de la zero: x25519 + AES-GCM + SHA-256). Are inapoi/inainte/reload, istoric,
 word-wrap, titluri, linkuri clicabile si derulare (sagetile sus/jos).
-Momentan doar HTTP (http://...); HTTPS/TLS urmeaza. Incearca info.cern.ch.
+Bara de adresa: click ca sa pui cursorul unde vrei si editezi in loc; tastare
+directa (fara click) = adresa noua. Incearca https://example.com sau info.cern.ch.
+Nota: paginile construite complet cu JavaScript (ex. Google) se descarca dar nu
+se pot afisa - MyOS nu are motor JS.
 
 Taskbar: buton Terminal (click = deschide/comuta; click dreapta = Terminal
 nou), File Manager (Alt+F4), Notepad (Alt+F5), Task Manager (Alt+F6),

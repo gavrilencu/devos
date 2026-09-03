@@ -6,6 +6,7 @@
 #include "browser.h"
 #include "fb.h"
 #include "netstack.h"
+#include "tls.h"
 #include "pmm.h"
 #include "string.h"
 #include "task.h"
@@ -420,10 +421,6 @@ static int http_get(const char *url)
     char host[160], path[320];
     int port, tls;
     url_split(url, host, sizeof(host), path, sizeof(path), &port, &tls);
-    if (tls) {
-        strcpy(status, "HTTPS necesita TLS (in lucru) - doar HTTP momentan.");
-        return -2;
-    }
     if (!host[0]) return -1;
 
     /* rezolvare */
@@ -444,13 +441,20 @@ static int http_get(const char *url)
     }
     if (!ip) { strcpy(status, "Nu pot rezolva gazda."); return -1; }
 
-    strcpy(status, "Conectare ...");
+    strcpy(status, tls ? "Conectare TLS ..." : "Conectare ...");
     dirty = 1;
-    int hc = tcp_connect(ip, (uint16_t)port);
-    if (hc < 0) { strcpy(status, "Fara conexiuni libere."); return -1; }
-    int st;
-    while ((st = tcp_status(hc)) == 1) task_sleep(25);
-    if (st != 2) { strcpy(status, "Conectare esuata."); return -1; }
+
+    int hc;
+    if (tls) {
+        hc = tls_connect(ip, (uint16_t)port, host);
+        if (hc < 0) { strcpy(status, "Handshake TLS esuat (sau site TLS 1.3)."); return -1; }
+    } else {
+        hc = tcp_connect(ip, (uint16_t)port);
+        if (hc < 0) { strcpy(status, "Fara conexiuni libere."); return -1; }
+        int st;
+        while ((st = tcp_status(hc)) == 1) task_sleep(25);
+        if (st != 2) { strcpy(status, "Conectare esuata."); return -1; }
+    }
 
     /* cerere */
     char req[600];
@@ -462,7 +466,8 @@ static int http_get(const char *url)
     const char *e = "\r\nUser-Agent: MyOS-Browser/1.0\r\n"
                     "Accept: text/html\r\nConnection: close\r\n\r\n";
     while (*e) req[p++] = *e++;
-    tcp_csend(hc, req, p);
+    if (tls) tls_send(hc, req, p);
+    else     tcp_csend(hc, req, p);
 
     strcpy(status, "Se incarca ...");
     dirty = 1;
@@ -471,24 +476,26 @@ static int http_get(const char *url)
     int idle = 0;
     for (;;) {
         int cap = HTML_CAP - 1 - html_len;
-        int got = 0;
-        while (cap > 0) {
-            int chunk = cap > 1400 ? 1400 : cap;
-            int r = tcp_crecv(hc, html + html_len, chunk);
-            if (r <= 0) break;
-            html_len += r; cap -= r; got += r;
+        if (cap <= 0) break;
+        int chunk = cap > 1400 ? 1400 : cap;
+        int r;
+        if (tls) r = tls_recv(hc, html + html_len, chunk);
+        else     r = tcp_crecv(hc, html + html_len, chunk);
+        if (r > 0) { html_len += r; idle = 0; continue; }
+        if (tls) {
+            if (r < 0) break;            /* TLS inchis */
+        } else {
+            if (tcp_status(hc) == 0) {
+                int r2 = tcp_crecv(hc, html + html_len, cap);
+                if (r2 > 0) { html_len += r2; continue; }
+                break;
+            }
         }
-        if (got > 0) { idle = 0; if (html_len >= HTML_CAP - 1) break; continue; }
-        if (tcp_status(hc) == 0) {
-            /* golim ce a mai ramas */
-            int r = tcp_crecv(hc, html + html_len, HTML_CAP - 1 - html_len);
-            if (r > 0) { html_len += r; continue; }
-            break;
-        }
-        if (++idle > 300) break;     /* ~7.5s fara date */
+        if (++idle > 300) break;
         task_sleep(25);
     }
-    tcp_cclose(hc);
+    if (tls) tls_close(hc);
+    else     tcp_cclose(hc);
     html[html_len] = '\0';
     return parse_status(html, html_len);
 }
@@ -522,10 +529,6 @@ static void do_fetch(const char *url0)
             if (find_header(html, html_len, "location:", loc, sizeof(loc))) {
                 char nxt[300];
                 resolve_url(url, loc, nxt, sizeof(nxt));
-                if (ci_eq(nxt, "https://", 8)) {
-                    strcpy(status, "Site-ul cere HTTPS (TLS in lucru).");
-                    state = ST_ERR; dirty = 1; return;
-                }
                 strncpy(url, nxt, sizeof(url) - 1);
                 url[sizeof(url) - 1] = '\0';
                 strncpy(cur_url, url, sizeof(cur_url) - 1);
@@ -627,13 +630,14 @@ static void browser_fwd(void)
 
 static const char *HOME =
     "<h1>MyOS Browser</h1>"
-    "<p>Scrie o adresa in bara de sus si apasa Enter.</p>"
+    "<p>Scrie o adresa in bara de sus si apasa Enter. Merge HTTP si HTTPS.</p>"
     "<p>Exemple (click pe link):</p>"
-    "<p><a href=\"http://info.cern.ch/\">info.cern.ch</a> - primul site web din lume</p>"
-    "<p><a href=\"http://httpforever.com/\">httpforever.com</a> - pagina de test HTTP</p>"
-    "<p><a href=\"http://example.com/\">example.com</a></p>"
-    "<p>Comenzi: sagetile sus/jos = derulare, Backspace = inapoi.</p>"
-    "<p>Nota: HTTPS (TLS) este inca in dezvoltare; momentan doar HTTP.</p>";
+    "<p><a href=\"https://example.com/\">https://example.com</a> - test HTTPS/TLS</p>"
+    "<p><a href=\"http://info.cern.ch/\">http://info.cern.ch</a> - primul site web din lume</p>"
+    "<p><a href=\"https://www.google.com/\">https://www.google.com</a></p>"
+    "<p><a href=\"http://httpforever.com/\">http://httpforever.com</a></p>"
+    "<p>Comenzi: sagetile sus/jos = derulare, click pe bara = editezi adresa,"
+    " Backspace (fara focus) = inapoi.</p>";
 
 void browser_init(void)
 {
@@ -738,6 +742,13 @@ void browser_draw(int cx, int cy)
     } else if (state == ST_ERR) {
         fb_text(cx + BR_MARGIN, py + 20, "Nu s-a putut incarca pagina.", 0xC0392B, PAGE_BG);
         fb_text(cx + BR_MARGIN, py + 44, status, 0x808388, PAGE_BG);
+    } else if (run_n == 0) {
+        fb_text(cx + BR_MARGIN, py + 20,
+                "Pagina nu contine text vizibil.", 0x606368, PAGE_BG);
+        fb_text(cx + BR_MARGIN, py + 44,
+                "Probabil e construita cu JavaScript (neacceptat inca).",
+                0x808388, PAGE_BG);
+        fb_text(cx + BR_MARGIN, py + 68, status, 0xA0A4AC, PAGE_BG);
     } else {
         int top = py, bot = py + BR_PAGE_H;
         for (int i = 0; i < run_n; i++) {
@@ -822,8 +833,8 @@ void browser_click(int cx, int cy, int mx, int my)
             struct run *r = &runs[i];
             if (r->link < 0) continue;
             int rw = (int)strlen(r->text) * 8;
-            if (rx >= r->x && rx < r->x + rw &&
-                content_y >= r->y && content_y < r->y + 16) {
+            if (rx >= r->x - 2 && rx < r->x + rw + 2 &&
+                content_y >= r->y - 2 && content_y < r->y + 18) {
                 char full[300];
                 resolve_url(cur_url, links[r->link], full, sizeof(full));
                 browser_navigate(full);
@@ -886,10 +897,13 @@ int browser_key(char ch)
     if (c == ' ') { browser_scroll(BR_PAGE_H / BR_LINE - 1); return 1; }
     if (c == '\b') { browser_back(); return 1; }
     if (c == '\n' || (c >= 32 && c < 127)) {
-        /* tastarea focuseaza bara si insereaza la sfarsit (fara sa stearga) */
+        /* a tasta fara sa fi dat click = adresa noua (porneste de la zero).
+         * pentru editare in loc: click pe bara (pune cursorul unde vrei). */
         addr_focus = 1;
-        addr_caret = addr_len;
-        if (c >= 32 && c < 127 && addr_len < (int)sizeof(addr) - 1) {
+        addr_len = 0;
+        addr_caret = 0;
+        addr_view = 0;
+        if (c >= 32 && c < 127) {
             addr[addr_len++] = (char)c;
             addr[addr_len] = '\0';
             addr_caret = addr_len;
