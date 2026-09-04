@@ -434,7 +434,18 @@ reboot — până la următorul `wsl make`, care regenerează imaginea.
         minimizeaza, rosu = inchide + termina procesele; browser si aplicatii
         se re-incadreaza la dimensiunea ferestrei
       - Task Manager live; taskbar mereu jos la orice rezolutie; QEMU full-screen
-- [ ] Tabele, mai mult CSS (flex/grid), decodor JPEG
+- [x] Milestone 42: **UI stil Windows 11 + iconuri colorate** (v0.42):
+      - **iconuri dintr-o librarie de iconuri** (fontul Segoe Fluent/MDL2):
+        `scripts/genicons.ps1` le randeaza pe host cu anti-aliasing (tile colorat
+        + glifa) in `fs/ic_*.raw` (RGBA 40x40); kernelul le incarca de pe disc si
+        le deseneaza cu alpha blending (`fb_blit_rgba`) — nu mai sunt pixel-art
+      - **taskbar centrat** (stil Win11) cu iconurile aplicatiilor + indicator sub
+        aplicatia activa; **meniu Start** centrat cu grid de iconuri + Repornire/Oprire
+      - fix: imaginea de disc marita la **24 MiB** (`FS_MAX_SECTORS` marit) ca sa
+        incapa wallpaper-ele Full HD (2 x 8.3 MiB) + iconurile fara truncheare
+      - limita ramasa: textul interfetei foloseste inca fontul bitmap 8x16 al
+        BIOS-ului (un motor de font anti-aliasing e un pas separat)
+- [ ] Font UI anti-aliasing (proportional), tabele, mai mult CSS, decodor JPEG
 - [ ] SSH: schimb de chei Diffie-Hellman + cifru, peste TCP
 
 **Limită onestă:** motorul JS rulează JavaScript simplu/vanilla, dar **nu** e V8:
