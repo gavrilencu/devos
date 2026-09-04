@@ -13,7 +13,8 @@
 #include "string.h"
 
 #define MAX_TASKS   8
-#define STACK_PAGES 4                             /* 16 KiB de stiva per task */
+#define STACK_PAGES 32                            /* 128 KiB de stiva per task
+                                                     (browserul/JS recurseaza) */
 #define STACK_SIZE  (STACK_PAGES * PMM_FRAME_SIZE)
 #define USER_STACK_PAGES 4
 

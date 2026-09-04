@@ -373,9 +373,47 @@ reboot — până la următorul `wsl make`, care regenerează imaginea.
       - verificat: `https://example.com` afișat corect (828 octeți prin TLS);
         `https://www.google.com` — handshake TLS reușit, 22 KB descărcați și
         decriptați (dar pagina e 99% JavaScript, deci nu se randează vizual)
-- [ ] Motor de randare mai bogat (imagini, tabele, CSS de bază)
+- [x] Milestone 37: **motor de randare CSS** (v0.37) — browserul afișează
+      pagini stilizate aproape ca un browser real:
+      - parsează `<style>` și `style="..."` (selectoare simple: tag, `.class`,
+        `#id`); cascadă de stiluri cu moștenire pe o stivă de elemente
+      - proprietăți: `color`, `background`/`background-color`, `font-size`
+        (mapat la 1x/2x/3x pe fontul 8x16), `font-weight`, `text-align`
+        (stânga/centru/dreapta), `display:none`
+      - culori: `#rgb`, `#rrggbb`, `rgb(...)`, ~25 de nume
+      - HTML mai bogat: titluri cu mărimi reale, liste `ul`/`ol` cu marcatori,
+        `<hr>`, `blockquote`, comentarii, entități
+      - verificat vizual: titlu mare albastru centrat, subtitlu auriu, cutie cu
+        fundal galben, text 24px, listă cu marcatori, paragraf centrat roșu —
+        toate din CSS
+- [x] Milestone 38: **MOTOR JAVASCRIPT de la zero** (v0.38) — browserul rulează
+      JavaScript din pagini:
+      - `kernel/js.c` + `kernel/js_lib.h`: interpretor tree-walking (lexer,
+        parser cu precedență, evaluator), arenă bump resetată per pagină;
+        variabile (`var`/`let`/`const`), funcții (inclusiv arrow), `if`/`for`/
+        `for-in`/`while`/`do`, obiecte, array-uri, string-uri, operatori,
+        închideri (closures), recursie; bibliotecă: `console`, `Math`,
+        metode `String`/`Array` (map/filter/forEach/split/join...), `parseInt` etc.
+      - **DOM**: `kernel/browser.c` construiește un arbore DOM din HTML, rulează
+        `<script>`-urile, apoi re-serializează + reașează. API DOM: `document.write`,
+        `getElementById`, `.innerHTML`, `.textContent`, `createElement`,
+        `appendChild`, `setAttribute`, `.style.*`
+      - verificat pe host cu 28 de teste + vizual în MyOS: o pagină care
+        modifică DOM-ul cu `getElementById().innerHTML`, generează o listă
+        dintr-un `for`, scrie cu `document.write` și folosește `Array.map` —
+        toate se randează corect
+      - a necesitat SSE (numerele JS sunt `double`): `js.o` compilat cu SSE,
+        activat la boot (doar firul browserului îl folosește); stiva firelor
+        de kernel mărită la 128 KiB (parserul/evaluatorul recursează)
+- [ ] Imagini (decodor PNG/JPEG), tabele, mai mult CSS (flex/grid)
 - [ ] SSH: schimb de chei Diffie-Hellman + cifru, peste TCP
-- [ ] Higher-half kernel
+
+**Limită onestă:** motorul JS rulează JavaScript simplu/vanilla, dar **nu** e V8:
+nu rulează framework-uri mari (React/Angular) și nu are toate API-urile web.
+Site-uri ca Google, care își construiesc interfața integral cu JS de framework,
+se descarcă și se decriptează dar nu se randează complet. Un clon exact de Chrome
+(V8 + DOM complet + sutele de API-uri = ~35M de linii în Chromium) nu e
+realizabil de la zero. Paginile de conținut HTML+CSS+JS-vanilla se afișează bine.
 
 ## Cum testezi o panică
 

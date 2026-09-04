@@ -60,8 +60,24 @@ static void show_uptime(uint64_t secs)
 /* kmain — punctul de intrare in C, apelat din entry.asm.
  * Aici suntem deja in long mode (64-bit), cu primul 1 GiB identity-mapped,
  * intreruperi dezactivate si stiva proprie. */
+/* Activeaza SSE (necesar pentru double in motorul JS). Doar firul browserului
+ * foloseste xmm, iar restul kernelului e compilat -mno-sse, deci registrele
+ * xmm nu trebuie salvate la comutarea de context. */
+static void enable_sse(void)
+{
+    uint64_t cr0, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1UL << 2);          /* EM = 0 (fara emulare) */
+    cr0 |=  (1UL << 1);          /* MP = 1 */
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1UL << 9) | (1UL << 10);  /* OSFXSR | OSXMMEXCPT */
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+}
+
 void kmain(void)
 {
+    enable_sse();
     serial_init();
     console_init();
 

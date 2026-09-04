@@ -7,6 +7,7 @@
 #include "fb.h"
 #include "netstack.h"
 #include "tls.h"
+#include "js.h"
 #include "pmm.h"
 #include "string.h"
 #include "task.h"
@@ -50,19 +51,24 @@ static volatile int req_flag;
 static char *html;
 static int   html_len;
 
+/* un "run" = o bucata de text asezata, cu stilul ei calculat */
 struct run {
-    int y;
-    short x;
-    short link;
+    int y;                 /* y absolut in continut (varful) */
+    short x, w, h;         /* pozitie + dimensiuni in pixeli */
+    short link;            /* index in tabela de linkuri, sau -1 */
+    unsigned char scale;   /* marimea fontului: 1,2,3 (x 8x16) */
     unsigned char bold;
+    unsigned char align;   /* 0 stanga, 1 centru, 2 dreapta */
+    unsigned char pad;
     unsigned int color;
-    char text[28];
+    unsigned int bg;       /* fundal (0 = transparent) */
+    char text[32];
 };
-#define RUN_CAP 4000
+#define RUN_CAP 6000
 static struct run *runs;
 static int run_n;
 
-#define LINK_CAP 400
+#define LINK_CAP 600
 #define HREF_MAX 192
 static char (*links)[HREF_MAX];
 static int link_n;
@@ -77,11 +83,35 @@ static int  hist_n, hist_cur;
 
 static volatile int dirty;
 
-/* stare de layout (folosita doar de firul de retea) */
-static int  ly_x, ly_y;
-static int  ly_bold;
-static int  ly_link;
-static unsigned int ly_color;
+/* --- stil calculat (CSS) --- */
+struct style {
+    unsigned int color;
+    unsigned int bg;       /* 0 = transparent */
+    unsigned char scale;   /* 1..3 */
+    unsigned char bold;
+    unsigned char align;   /* 0 stanga, 1 centru, 2 dreapta */
+    unsigned char hidden;  /* display:none */
+    unsigned char pre;     /* whitespace pastrat (pre) */
+    int indent;            /* margine stanga (blockquote/li) */
+};
+
+/* reguli CSS extrase din <style> (selector simplu: tag, .class, #id) */
+struct cssrule {
+    char key[40];
+    char decl[200];        /* declaratiile brute "prop:val;..." */
+};
+#define CSS_CAP 300
+static struct cssrule *css;
+static int css_n;
+
+/* --- stare de layout (folosita doar de firul de retea) --- */
+#define STK 48
+static struct style stk[STK];
+static int stkn;
+static int  ly_x, ly_y, ly_link, ly_lineh;
+static int  list_depth;
+static int  list_num[16];      /* contor pt. <ol> pe nivel */
+static int  list_ol[16];
 
 /* ================= utilitare de string ================= */
 
@@ -161,38 +191,293 @@ static void resolve_url(const char *base, const char *href, char *out, int cap)
     out[i] = '\0';
 }
 
-/* ================= layout HTML ================= */
+/* ================= layout HTML + CSS ================= */
+
+static char stk_tag[STK][12];
+
+static struct style *cs(void) { return &stk[stkn > 0 ? stkn - 1 : 0]; }
+
+/* --- parsare culori CSS: #rgb, #rrggbb, rgb(...), nume --- */
+static int hexd(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    c |= 32;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+static unsigned int parse_color(const char *v, int *ok)
+{
+    *ok = 0;
+    while (*v == ' ' || *v == '\t') v++;
+    if (*v == '#') {
+        v++;
+        int d[8], nd = 0;
+        while (nd < 8) { int h = hexd(v[nd]); if (h < 0) break; d[nd] = h; nd++; }
+        if (nd >= 6) { *ok = 1; return (unsigned)((d[0]<<20)|(d[1]<<16)|(d[2]<<12)|(d[3]<<8)|(d[4]<<4)|d[5]); }
+        if (nd >= 3) { *ok = 1; return (unsigned)((d[0]<<20)|(d[0]<<16)|(d[1]<<12)|(d[1]<<8)|(d[2]<<4)|d[2]); }
+        return 0;
+    }
+    if (ci_eq(v, "rgb", 3)) {
+        while (*v && *v != '(') v++;
+        if (*v) v++;
+        int c[3] = { 0, 0, 0 }, ci = 0;
+        while (*v && *v != ')' && ci < 3) {
+            while (*v == ' ' || *v == ',') v++;
+            int val = 0, got = 0;
+            while (*v >= '0' && *v <= '9') { val = val * 10 + (*v - '0'); v++; got = 1; }
+            if (got) c[ci++] = val > 255 ? 255 : val;
+            while (*v && *v != ',' && *v != ')') v++;
+        }
+        *ok = 1;
+        return (unsigned)((c[0]<<16)|(c[1]<<8)|c[2]);
+    }
+    static const struct { const char *n; unsigned int c; } nm[] = {
+        {"black",0x000000},{"white",0xffffff},{"red",0xe01010},{"green",0x108010},
+        {"blue",0x1a56db},{"gray",0x808080},{"grey",0x808080},{"silver",0xc0c0c0},
+        {"maroon",0x800000},{"yellow",0xf0d000},{"orange",0xf08000},{"purple",0x800080},
+        {"navy",0x102060},{"teal",0x008080},{"lime",0x40c040},{"aqua",0x00b0b0},
+        {"fuchsia",0xd000d0},{"olive",0x808000},{"darkblue",0x102a6b},
+        {"lightgray",0xe0e0e0},{"lightgrey",0xe0e0e0},{"whitesmoke",0xf5f5f5},
+        {"transparent",0},
+    };
+    for (unsigned i = 0; i < sizeof(nm)/sizeof(nm[0]); i++) {
+        int L = (int)strlen(nm[i].n);
+        if (ci_eq(v, nm[i].n, L) && (v[L]==0||v[L]==' '||v[L]==';'||v[L]=='!')) {
+            *ok = 1; return nm[i].c;
+        }
+    }
+    return 0;
+}
+
+static int map_fontsize(const char *v)
+{
+    while (*v == ' ') v++;
+    if (*v >= '0' && *v <= '9') {
+        int n = 0;
+        while (*v >= '0' && *v <= '9') { n = n * 10 + (*v - '0'); v++; }
+        if (*v == '.') { v++; while (*v >= '0' && *v <= '9') v++; }
+        if (ci_eq(v, "em", 2) || ci_eq(v, "rem", 3))
+            return n >= 2 ? 3 : (n >= 1 ? 2 : 1);
+        if (n >= 30) return 3;
+        if (n >= 20) return 2;
+        return 1;
+    }
+    if (ci_eq(v, "xx-large", 8) || ci_eq(v, "x-large", 7)) return 3;
+    if (ci_eq(v, "large", 5) || ci_eq(v, "larger", 6)) return 2;
+    return 1;
+}
+
+/* citeste un atribut (class/id/style/href/color) dintr-un tag */
+static void read_attr(const char *s, const char *attr, char *out, int cap)
+{
+    out[0] = '\0';
+    int al = (int)strlen(attr);
+    for (int i = 0; s[i] && s[i] != '>'; i++) {
+        if ((i == 0 || s[i-1] == ' ' || s[i-1] == '\t') &&
+            ci_eq(s + i, attr, al) &&
+            (s[i+al] == '=' || s[i+al] == ' ')) {
+            int j = i + al;
+            while (s[j] == ' ') j++;
+            if (s[j] != '=') continue;
+            j++;
+            while (s[j] == ' ') j++;
+            char q = 0;
+            if (s[j] == '"' || s[j] == '\'') q = s[j++];
+            int o = 0;
+            while (s[j] && s[j] != '>' && o < cap - 1) {
+                if (q && s[j] == q) break;
+                if (!q && (s[j] == ' ' || s[j] == '\t')) break;
+                out[o++] = s[j++];
+            }
+            out[o] = '\0';
+            return;
+        }
+    }
+}
+
+/* aplica un sir de declaratii "prop:val;..." peste un stil */
+static void apply_decls(struct style *st, const char *d)
+{
+    while (*d) {
+        while (*d == ' ' || *d == ';' || *d == '\n' || *d == '\t' || *d == '\r') d++;
+        if (!*d || *d == '}') break;
+        char prop[28]; int pl = 0;
+        while (*d && *d != ':' && *d != ';' && *d != '}' && pl < 27) {
+            char c = *d; if (c >= 'A' && c <= 'Z') c += 32; prop[pl++] = c; d++;
+        }
+        prop[pl] = '\0';
+        if (*d != ':') { while (*d && *d != ';' && *d != '}') d++; continue; }
+        d++;
+        char val[72]; int vl = 0;
+        while (*d && *d != ';' && *d != '}' && vl < 71) val[vl++] = *d++;
+        val[vl] = '\0';
+        char *vv = val; while (*vv == ' ') vv++;
+        int ok;
+        if (strcmp(prop, "color") == 0) {
+            unsigned c = parse_color(vv, &ok); if (ok) st->color = c;
+        } else if (strcmp(prop, "background") == 0 || strcmp(prop, "background-color") == 0) {
+            if (ci_eq(vv, "transparent", 11) || ci_eq(vv, "none", 4)) st->bg = 0;
+            else { unsigned c = parse_color(vv, &ok); if (ok) st->bg = c ? c : 0; }
+        } else if (strcmp(prop, "font-size") == 0) {
+            st->scale = (unsigned char)map_fontsize(vv);
+        } else if (strcmp(prop, "font-weight") == 0) {
+            st->bold = (unsigned char)(ci_eq(vv, "bold", 4) || (vv[0] >= '6' && vv[0] <= '9'));
+        } else if (strcmp(prop, "text-align") == 0) {
+            st->align = (unsigned char)(ci_eq(vv, "center", 6) ? 1 :
+                        (ci_eq(vv, "right", 5) ? 2 : 0));
+        } else if (strcmp(prop, "display") == 0) {
+            if (ci_eq(vv, "none", 4)) st->hidden = 1;
+        }
+    }
+}
+
+/* extrage regulile din continutul unui bloc <style> */
+static void parse_style_block(const char *s, int n)
+{
+    int i = 0;
+    while (i < n && css_n < CSS_CAP) {
+        while (i < n && (s[i]==' '||s[i]=='\n'||s[i]=='\t'||s[i]=='\r')) i++;
+        if (i + 1 < n && s[i] == '/' && s[i+1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(s[i]=='*' && s[i+1]=='/')) i++;
+            i += 2; continue;
+        }
+        int selstart = i;
+        while (i < n && s[i] != '{') i++;
+        if (i >= n) break;
+        int selend = i; i++;
+        int decstart = i;
+        while (i < n && s[i] != '}') i++;
+        int decend = i;
+        if (i < n) i++;
+        int p = selstart;
+        while (p < selend) {
+            int q = p;
+            while (q < selend && s[q] != ',') q++;
+            int a = p; while (a < q && (s[a]==' '||s[a]=='\n'||s[a]=='\t'||s[a]=='\r')) a++;
+            int b = q; while (b > a && (s[b-1]==' '||s[b-1]=='\n'||s[b-1]=='\t'||s[b-1]=='\r')) b--;
+            int start = a;
+            for (int k = a; k < b; k++)
+                if (s[k]==' '||s[k]=='>'||s[k]=='+'||s[k]=='~') start = k + 1;
+            int simple = 1;
+            for (int k = start; k < b; k++)
+                if (s[k]==':'||s[k]=='['||s[k]=='*'||s[k]==' ') simple = 0;
+            int keylen = b - start;
+            if (simple && keylen > 0 && keylen < 39 && css_n < CSS_CAP) {
+                struct cssrule *r = &css[css_n];
+                int kl = 0;
+                for (int k = start; k < b; k++) {
+                    char c = s[k]; if (c >= 'A' && c <= 'Z') c += 32; r->key[kl++] = c;
+                }
+                r->key[kl] = '\0';
+                int dl = 0;
+                for (int k = decstart; k < decend && dl < (int)sizeof(r->decl) - 1; k++)
+                    r->decl[dl++] = s[k];
+                r->decl[dl] = '\0';
+                css_n++;
+            }
+            p = q + 1;
+        }
+    }
+}
+
+static int class_has(const char *cls, const char *name)
+{
+    int nl = (int)strlen(name);
+    for (int i = 0; cls[i]; ) {
+        while (cls[i] == ' ') i++;
+        int j = i; while (cls[j] && cls[j] != ' ') j++;
+        if (j - i == nl && ci_eq(cls + i, name, nl)) return 1;
+        i = j;
+    }
+    return 0;
+}
+
+/* culorile implicite ale unei etichete */
+static void tag_defaults(struct style *st, const char *n)
+{
+    if (n[0] == 'h' && n[1] >= '1' && n[1] <= '6' && n[2] == 0) {
+        st->bold = 1;
+        st->scale = (n[1] == '1') ? 3 : (n[1] <= '3' ? 2 : 1);
+    } else if (strcmp(n, "b") == 0 || strcmp(n, "strong") == 0 ||
+               strcmp(n, "th") == 0) {
+        st->bold = 1;
+    } else if (strcmp(n, "a") == 0) {
+        st->color = LINK_FG;
+    } else if (strcmp(n, "small") == 0) {
+        st->scale = 1;
+    } else if (strcmp(n, "big") == 0) {
+        st->scale = 2;
+    } else if (strcmp(n, "center") == 0) {
+        st->align = 1;
+    } else if (strcmp(n, "blockquote") == 0) {
+        st->indent += 24; st->color = 0x555555;
+    } else if (strcmp(n, "ul") == 0 || strcmp(n, "ol") == 0 ||
+               strcmp(n, "dl") == 0) {
+        st->indent += 22;
+    }
+}
+
+/* calculeaza stilul pentru o eticheta: mostenit + implicit + CSS + inline */
+static void compute_style(struct style *st, const char *name, const char *tagstart)
+{
+    tag_defaults(st, name);
+
+    char cls[160], id[64];
+    read_attr(tagstart, "class", cls, sizeof(cls));
+    read_attr(tagstart, "id", id, sizeof(id));
+
+    for (int r = 0; r < css_n; r++) {
+        const char *sel = css[r].key;
+        int match = 0;
+        if (sel[0] == '.') { if (cls[0] && class_has(cls, sel + 1)) match = 1; }
+        else if (sel[0] == '#') { if (id[0] && strcmp(id, sel + 1) == 0) match = 1; }
+        else if (strcmp(sel, name) == 0) match = 1;
+        if (match) apply_decls(st, css[r].decl);
+    }
+
+    char inl[200];
+    read_attr(tagstart, "style", inl, sizeof(inl));
+    if (inl[0]) apply_decls(st, inl);
+}
 
 static void ly_newline(void)
 {
-    ly_x = BR_MARGIN;
-    ly_y += BR_LINE;
-}
-
-static void ly_blank(void)   /* linie goala doar daca nu suntem deja la inceput */
-{
-    if (ly_x > BR_MARGIN) ly_newline();
-    ly_y += BR_LINE / 2;
+    ly_x = BR_MARGIN + cs()->indent;
+    ly_y += ly_lineh;
+    ly_lineh = 20;
 }
 
 static void emit_word(const char *w, int len)
 {
     if (len <= 0) return;
-    if (len > 70) len = 70;
-    int wpx = len * 8;
-    if (ly_x > BR_MARGIN && ly_x + wpx > BR_RIGHT) ly_newline();
+    struct style *st = cs();
+    if (st->hidden) return;
+    if (len > 31) len = 31;
+    int sc = st->scale ? st->scale : 1;
+    int cw = 8 * sc;
+    int wpx = len * cw;
+    int line_start = BR_MARGIN + st->indent;
+    if (ly_x > line_start && ly_x + wpx > BR_RIGHT) ly_newline();
+    int h = 16 * sc;
+    if (h + 4 > ly_lineh) ly_lineh = h + 4;
     if (run_n < RUN_CAP) {
         struct run *r = &runs[run_n++];
         r->x = (short)ly_x;
         r->y = ly_y;
-        r->bold = (unsigned char)ly_bold;
+        r->w = (short)wpx;
+        r->h = (short)h;
+        r->scale = (unsigned char)sc;
+        r->bold = st->bold;
+        r->align = st->align;
         r->link = (short)ly_link;
-        r->color = ly_color;
+        r->color = st->color;
+        r->bg = st->bg;
         int c = 0;
-        for (; c < len && c < 27; c++) r->text[c] = w[c];
+        for (; c < len && c < 31; c++) r->text[c] = w[c];
         r->text[c] = '\0';
     }
-    ly_x += wpx + 8;
+    ly_x += wpx + (sc > 1 ? 4 * sc : 6);
 }
 
 /* decodeaza o entitate care incepe la &; scrie in *out un octet, intoarce
@@ -229,51 +514,85 @@ static int read_tag_name(const char *s, char *name, int cap)
     return i;
 }
 
-/* extrage atributul href din interiorul unui tag (pana la '>') */
-static void read_href(const char *s, char *out, int cap)
+/* eticheta fara continut (nu deschide un context de stil) */
+static int is_void_tag(const char *n)
 {
-    out[0] = '\0';
-    for (int i = 0; s[i] && s[i] != '>'; i++) {
-        if ((s[i] == 'h' || s[i] == 'H') && ci_eq(s + i, "href", 4)) {
-            int j = i + 4;
-            while (s[j] == ' ' || s[j] == '=') j++;
-            char q = 0;
-            if (s[j] == '"' || s[j] == '\'') q = s[j++];
-            int o = 0;
-            while (s[j] && s[j] != '>' && o < cap - 1) {
-                if (q && s[j] == q) break;
-                if (!q && (s[j] == ' ' || s[j] == '\t')) break;
-                out[o++] = s[j++];
-            }
-            out[o] = '\0';
-            return;
-        }
-    }
+    static const char *v[] = { "br", "hr", "img", "meta", "link", "input",
+                               "source", "track", "area", "base", "col",
+                               "embed", "param", "wbr" };
+    for (unsigned i = 0; i < sizeof(v)/sizeof(v[0]); i++)
+        if (strcmp(n, v[i]) == 0) return 1;
+    return 0;
 }
 
+/* eticheta de tip bloc (rupe randul) */
 static int is_block_tag(const char *n)
 {
-    static const char *b[] = { "p", "div", "br", "h1", "h2", "h3", "h4", "h5",
-                               "h6", "li", "tr", "ul", "ol", "table", "form",
-                               "header", "footer", "section", "article", "nav",
-                               "hr", "blockquote", "pre", "figure", "main" };
-    for (unsigned i = 0; i < sizeof(b) / sizeof(b[0]); i++)
+    static const char *b[] = { "p","div","h1","h2","h3","h4","h5","h6","li",
+                               "tr","ul","ol","dl","dd","dt","table","thead",
+                               "tbody","form","header","footer","section",
+                               "article","nav","aside","blockquote","pre",
+                               "figure","figcaption","main","address",
+                               "fieldset","hr","center","title" };
+    for (unsigned i = 0; i < sizeof(b)/sizeof(b[0]); i++)
         if (strcmp(n, b[i]) == 0) return 1;
     return 0;
 }
 
-static int is_heading(const char *n)
-{
-    return n[0] == 'h' && n[1] >= '1' && n[1] <= '3' && n[2] == '\0';
-}
-
 static char page_title[80];
+
+/* aliniere pe linii: deplaseaza rulele cu align != 0 (post-procesare) */
+static void align_pass(void)
+{
+    int i = 0;
+    while (i < run_n) {
+        int j = i;
+        int y = runs[i].y;
+        int right = 0, left = runs[i].x;
+        while (j < run_n && runs[j].y == y) {
+            int r = runs[j].x + runs[j].w;
+            if (r > right) right = r;
+            if (runs[j].x < left) left = runs[j].x;
+            j++;
+        }
+        int al = runs[i].align;
+        if (al == 1) {                        /* centru */
+            int shift = (BR_MARGIN + BR_RIGHT - (right - left)) / 2 - left;
+            if (shift > 0) for (int k = i; k < j; k++) runs[k].x += shift;
+        } else if (al == 2) {                 /* dreapta */
+            int shift = BR_RIGHT - right;
+            if (shift > 0) for (int k = i; k < j; k++) runs[k].x += shift;
+        }
+        i = j;
+    }
+}
 
 static void layout_html(const char *h, int n)
 {
-    run_n = 0; link_n = 0; content_h = 0; page_title[0] = '\0';
-    ly_x = BR_MARGIN; ly_y = BR_MARGIN;
-    ly_bold = 0; ly_link = -1; ly_color = PAGE_FG;
+    run_n = 0; link_n = 0; css_n = 0; content_h = 0; page_title[0] = '\0';
+    ly_x = BR_MARGIN; ly_y = BR_MARGIN; ly_link = -1; ly_lineh = 20;
+    list_depth = 0;
+
+    /* stilul de baza */
+    stkn = 1;
+    stk[0].color = PAGE_FG; stk[0].bg = 0; stk[0].scale = 1;
+    stk[0].bold = 0; stk[0].align = 0; stk[0].hidden = 0; stk[0].pre = 0;
+    stk[0].indent = 0;
+    stk_tag[0][0] = '\0';
+
+    /* prima trecere: extragem toate blocurile <style> pentru CSS */
+    for (int k = 0; k + 6 < n; k++) {
+        if (h[k] == '<' && ci_eq(h + k + 1, "style", 5) &&
+            (h[k+6] == '>' || h[k+6] == ' ')) {
+            int j = k + 6;
+            while (j < n && h[j] != '>') j++;
+            j++;
+            int s0 = j;
+            while (j + 7 < n && !(h[j] == '<' && ci_eq(h + j + 1, "/style", 6))) j++;
+            parse_style_block(h + s0, j - s0);
+            k = j;
+        }
+    }
 
     int i = 0;
     while (i < n) {
@@ -284,7 +603,6 @@ static void layout_html(const char *h, int n)
             char name[16];
             read_tag_name(ts, name, sizeof(name));
 
-            /* <script>/<style>: sarim tot pana la inchidere */
             if (!close && (strcmp(name, "script") == 0 || strcmp(name, "style") == 0)) {
                 const char *endtag = (name[0] == 's' && name[1] == 'c') ? "/script" : "/style";
                 int j = i + 1;
@@ -293,73 +611,129 @@ static void layout_html(const char *h, int n)
                     j++;
                 }
                 i = j;
-                /* sarim si tag-ul de inchidere */
                 while (i < n && h[i] != '>') i++;
                 i++;
                 continue;
             }
+            if (strcmp(name, "title") == 0 && !close) {
+                int j = i; while (j < n && h[j] != '>') j++; j++;
+                int t = 0;
+                while (j < n && h[j] != '<' && t < (int)sizeof(page_title) - 1)
+                    page_title[t++] = h[j++];
+                page_title[t] = '\0';
+                i = j; continue;
+            }
+            /* comentarii HTML */
+            if (!close && h[i+1] == '!' && h[i+2] == '-' && h[i+3] == '-') {
+                int j = i + 4;
+                while (j + 2 < n && !(h[j]=='-'&&h[j+1]=='-'&&h[j+2]=='>')) j++;
+                i = j + 3; continue;
+            }
 
-            if (strcmp(name, "title") == 0) {
-                if (!close) {
-                    int j = i;
-                    while (j < n && h[j] != '>') j++;
-                    j++;
-                    int t = 0;
-                    while (j < n && h[j] != '<' && t < (int)sizeof(page_title) - 1)
-                        page_title[t++] = h[j++];
-                    page_title[t] = '\0';
-                    i = j;
-                    continue;
+            int block = is_block_tag(name);
+            int selfclose = 0;
+            { int j = i; while (j < n && h[j] != '>') { if (h[j]=='/'&&h[j+1]=='>') selfclose=1; j++; } }
+
+            if (block && (strcmp(name,"br")!=0)) {
+                if (ly_x > BR_MARGIN + cs()->indent) ly_newline();
+            }
+
+            if (!close) {
+                /* deschidere: calculam si punem stilul pe stiva */
+                if (!is_void_tag(name) && !selfclose && stkn < STK) {
+                    struct style ns = *cs();
+                    compute_style(&ns, name, ts);
+                    stk[stkn] = ns;
+                    int tl = 0; for (; name[tl] && tl < 11; tl++) stk_tag[stkn][tl] = name[tl];
+                    stk_tag[stkn][tl] = '\0';
+                    stkn++;
+                } else {
+                    /* void/self-close: aplicam efectele imediate (ex. img alt) */
                 }
-            } else if (strcmp(name, "a") == 0) {
-                if (!close) {
+                if (strcmp(name, "a") == 0) {
                     char href[HREF_MAX];
-                    read_href(ts, href, sizeof(href));
+                    read_attr(ts, "href", href, sizeof(href));
                     if (href[0] && link_n < LINK_CAP) {
                         int k = 0;
                         for (; href[k] && k < HREF_MAX - 1; k++) links[link_n][k] = href[k];
                         links[link_n][k] = '\0';
                         ly_link = link_n++;
-                        ly_color = LINK_FG;
                     }
-                } else {
-                    ly_link = -1;
-                    ly_color = PAGE_FG;
                 }
-            } else if (is_heading(name)) {
-                ly_blank();
-                if (ly_x > BR_MARGIN) ly_newline();
-                ly_bold = !close;
-                ly_color = close ? PAGE_FG : HEAD_FG;
-                if (close) ly_blank();
-            } else if (strcmp(name, "b") == 0 || strcmp(name, "strong") == 0) {
-                ly_bold = !close;
-            } else if (is_block_tag(name)) {
-                if (ly_x > BR_MARGIN) ly_newline();
-                if (strcmp(name, "p") == 0 || strcmp(name, "li") == 0)
-                    ly_y += 2;      /* mic spatiu intre paragrafe */
+                if (strcmp(name, "ul") == 0 || strcmp(name, "ol") == 0) {
+                    if (list_depth < 15) {
+                        list_depth++;
+                        list_ol[list_depth] = (name[0] == 'o');
+                        list_num[list_depth] = 0;
+                    }
+                }
+                if (strcmp(name, "li") == 0) {
+                    if (ly_x > BR_MARGIN + cs()->indent) ly_newline();
+                    char b[8];
+                    if (list_depth > 0 && list_ol[list_depth]) {
+                        int num = ++list_num[list_depth];
+                        int p = 0; char t[6]; int ti = 0;
+                        do { t[ti++] = (char)('0'+num%10); num/=10; } while (num);
+                        while (ti--) b[p++] = t[ti];
+                        b[p++] = '.'; b[p] = 0;
+                    } else { b[0] = '-'; b[1] = 0; }
+                    emit_word(b, (int)strlen(b));
+                }
+                if (strcmp(name, "hr") == 0) {
+                    if (ly_x > BR_MARGIN) ly_newline();
+                    ly_y += 4;
+                    if (run_n < RUN_CAP) {
+                        struct run *r = &runs[run_n++];
+                        r->x = BR_MARGIN; r->y = ly_y; r->w = BR_RIGHT - BR_MARGIN;
+                        r->h = 1; r->scale = 1; r->bold = 0; r->align = 0;
+                        r->link = -1; r->color = 0xCCCCCC; r->bg = 0xCCCCCC;
+                        r->text[0] = '\0';
+                    }
+                    ly_y += 8; ly_x = BR_MARGIN + cs()->indent;
+                }
+                if (strcmp(name, "img") == 0) {
+                    char alt[64];
+                    read_attr(ts, "alt", alt, sizeof(alt));
+                    if (alt[0]) { emit_word("[", 1);
+                        /* alt-ul, cuvant cu cuvant, e prea mult; scurt: */
+                    }
+                }
+                if (strcmp(name, "p") == 0 || (name[0]=='h'&&name[1]>='1'&&name[1]<='6'&&name[2]==0))
+                    ly_y += 4;   /* spatiu inainte de paragraf/titlu */
+            } else {
+                /* inchidere: scoatem de pe stiva pana la eticheta */
+                if (strcmp(name, "a") == 0) ly_link = -1;
+                if (strcmp(name, "ul") == 0 || strcmp(name, "ol") == 0) {
+                    if (list_depth > 0) list_depth--;
+                }
+                for (int s = stkn - 1; s >= 1; s--) {
+                    if (strcmp(stk_tag[s], name) == 0) { stkn = s; break; }
+                }
+                if (block && strcmp(name,"br")!=0) {
+                    if (ly_x > BR_MARGIN + cs()->indent) ly_newline();
+                    if (strcmp(name,"p")==0 || (name[0]=='h'&&name[1]>='1'&&name[1]<='6'))
+                        ly_y += 6;
+                }
+            }
+            if (strcmp(name, "br") == 0) {
+                if (ly_x > BR_MARGIN + cs()->indent) ly_newline();
+                else ly_y += ly_lineh;
             }
 
-            /* avanseaza dupa '>' */
             while (i < n && h[i] != '>') i++;
             i++;
         } else if (c == '&') {
             char out;
             int used = decode_entity(h + i, &out);
             if (used) {
-                char w[2] = { out, 0 };
-                if (out == ' ') { ly_x += 8; }
-                else emit_word(w, 1);
+                if (out == ' ') ly_x += 8;
+                else { char w[2] = { out, 0 }; emit_word(w, 1); }
                 i += used;
-            } else {
-                emit_word("&", 1);
-                i++;
-            }
+            } else { emit_word("&", 1); i++; }
         } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
             i++;
         } else {
-            /* un cuvant: pana la spatiu/tag/entitate */
-            char word[80];
+            char word[64];
             int wl = 0;
             while (i < n && wl < (int)sizeof(word) - 1) {
                 char d = h[i];
@@ -372,7 +746,254 @@ static void layout_html(const char *h, int n)
         }
         if (run_n >= RUN_CAP) break;
     }
-    content_h = ly_y + BR_LINE;
+    content_h = ly_y + ly_lineh;
+    align_pass();
+}
+
+/* ================= DOM + executie JavaScript ================= */
+
+#define DOM_MAX 6000
+struct dnode {
+    char tag[20];
+    int kind;              /* 0 element, 1 text, 2 raw-html, 3 style */
+    char *text; int tlen;  /* text/raw/style continut, sau inner-override */
+    int has_inner;
+    char *attrs; int alen; /* atributele brute (in bufferul html) */
+    char *ov_style; int ov_style_len;
+    char *ov_class; int ov_class_len;
+    char *extra; int elen; /* alte atribute din setAttribute */
+    char id[48];
+    int parent, child, sib, last;
+};
+static struct dnode *dnodes;
+static int dnode_n;
+static int dom_body_h;
+
+#define DOM_SCR_CAP (512 * 1024)
+static char *dom_scratch;
+static int dom_scr_used;
+
+#define JS_ARENA (8 * 1024 * 1024)
+static char *js_arena;
+
+#define SER_CAP (256 * 1024)
+static char *ser_all;
+
+struct scriptrec { const char *src; int len; };
+static struct scriptrec scripts[128];
+static int nscripts;
+
+static char *dsalloc(int n)
+{
+    n = (n + 3) & ~3;
+    if (dom_scr_used + n > DOM_SCR_CAP) return dom_scratch;  /* zona sigura */
+    char *p = dom_scratch + dom_scr_used;
+    dom_scr_used += n;
+    return p;
+}
+
+static int dom_new(int kind)
+{
+    if (dnode_n >= DOM_MAX) return dnode_n - 1;
+    int i = dnode_n++;
+    struct dnode *d = &dnodes[i];
+    d->tag[0] = 0; d->kind = kind; d->text = 0; d->tlen = 0; d->has_inner = 0;
+    d->attrs = 0; d->alen = 0; d->ov_style = 0; d->ov_style_len = 0;
+    d->ov_class = 0; d->ov_class_len = 0; d->extra = 0; d->elen = 0;
+    d->id[0] = 0; d->parent = -1; d->child = -1; d->sib = -1; d->last = -1;
+    return i;
+}
+static void dom_add_child(int p, int c)
+{
+    if (p < 0 || c < 0) return;
+    dnodes[c].parent = p; dnodes[c].sib = -1;
+    if (dnodes[p].last < 0) dnodes[p].child = c;
+    else dnodes[dnodes[p].last].sib = c;
+    dnodes[p].last = c;
+}
+
+static void dom_build(const char *h, int n)
+{
+    dnode_n = 0; nscripts = 0; dom_scr_used = 0; dom_body_h = 0;
+    int root = dom_new(0);
+    strcpy(dnodes[root].tag, "#root");
+    int stack[128]; int sp = 0; stack[sp++] = root;
+    int cur = root;
+    int i = 0;
+    while (i < n && dnode_n < DOM_MAX - 2) {
+        if (h[i] == '<') {
+            if (h[i+1] == '!') {
+                if (h[i+2]=='-'&&h[i+3]=='-') { i+=4; while (i+2<n && !(h[i]=='-'&&h[i+1]=='-'&&h[i+2]=='>')) i++; i+=3; }
+                else { while (i<n && h[i]!='>') i++; i++; }
+                continue;
+            }
+            if (h[i+1] == '/') {
+                char name[20]; read_tag_name(h+i+2, name, sizeof(name));
+                for (int s = sp-1; s >= 1; s--)
+                    if (strcmp(dnodes[stack[s]].tag, name) == 0) { sp = s; cur = stack[s-1]; break; }
+                while (i<n && h[i]!='>') i++;
+                i++;
+                continue;
+            }
+            char name[20]; read_tag_name(h+i+1, name, sizeof(name));
+            int nl = (int)strlen(name);
+            int ta = i + 1 + nl;
+            int gt = i; while (gt<n && h[gt]!='>') gt++;
+            int selfclose = gt>i && h[gt-1]=='/';
+            if (strcmp(name,"script")==0) {
+                int j = gt+1, s0 = j;
+                while (j<n && !(h[j]=='<' && ci_eq(h+j+1,"/script",7))) j++;
+                if (nscripts<128) { scripts[nscripts].src=h+s0; scripts[nscripts].len=j-s0; nscripts++; }
+                i=j; while (i<n && h[i]!='>') i++; i++; continue;
+            }
+            if (strcmp(name,"style")==0) {
+                int j = gt+1, s0 = j;
+                while (j<n && !(h[j]=='<' && ci_eq(h+j+1,"/style",6))) j++;
+                int node = dom_new(3); strcpy(dnodes[node].tag,"style");
+                dnodes[node].text=(char*)(h+s0); dnodes[node].tlen=j-s0; dnodes[node].has_inner=1;
+                dom_add_child(cur,node);
+                i=j; while (i<n && h[i]!='>') i++; i++; continue;
+            }
+            int node = dom_new(0);
+            for (int k=0;k<nl&&k<19;k++) dnodes[node].tag[k]=name[k];
+            dnodes[node].tag[nl<19?nl:19]=0;
+            dnodes[node].attrs=(char*)(h+ta);
+            dnodes[node].alen=(selfclose?gt-1:gt)-ta;
+            read_attr(h+ta, "id", dnodes[node].id, sizeof(dnodes[node].id));
+            dom_add_child(cur,node);
+            if (strcmp(name,"body")==0) dom_body_h=node;
+            if (!selfclose && !is_void_tag(name) && sp<128) { stack[sp++]=node; cur=node; }
+            i=gt+1;
+        } else {
+            int j=i; while (j<n && h[j]!='<') j++;
+            int node = dom_new(1);
+            dnodes[node].text=(char*)(h+i); dnodes[node].tlen=j-i;
+            dom_add_child(cur,node);
+            i=j;
+        }
+    }
+    if (dom_body_h==0) dom_body_h=root;
+}
+
+/* serializare arbore -> HTML */
+static char *ser_buf; static int ser_pos, ser_cap;
+static void ser_emit(const char *s, int n) { for (int i=0;i<n&&ser_pos<ser_cap-1;i++) ser_buf[ser_pos++]=s[i]; }
+static void ser_node(int idx)
+{
+    if (idx < 0) return;
+    struct dnode *d = &dnodes[idx];
+    if (d->kind == 1 || d->kind == 2) { ser_emit(d->text, d->tlen); return; }
+    if (d->kind == 3) { ser_emit("<style>",7); ser_emit(d->text,d->tlen); ser_emit("</style>",8); return; }
+    if (idx != 0) {
+        ser_emit("<",1); ser_emit(d->tag,(int)strlen(d->tag));
+        if (d->ov_class) { ser_emit(" class=\"",8); ser_emit(d->ov_class,d->ov_class_len); ser_emit("\"",1); }
+        if (d->ov_style) { ser_emit(" style=\"",8); ser_emit(d->ov_style,d->ov_style_len); ser_emit("\"",1); }
+        if (d->extra) ser_emit(d->extra,d->elen);
+        if (d->attrs && d->alen) { ser_emit(" ",1); ser_emit(d->attrs,d->alen); }
+        ser_emit(">",1);
+    }
+    if (d->has_inner) ser_emit(d->text,d->tlen);
+    else for (int c=d->child;c>=0;c=dnodes[c].sib) ser_node(c);
+    if (idx != 0 && !is_void_tag(d->tag)) { ser_emit("</",2); ser_emit(d->tag,(int)strlen(d->tag)); ser_emit(">",1); }
+}
+
+/* ---- callback-uri DOM pentru motorul JS ---- */
+static int br_getid(void *ud, const char *id)
+{
+    (void)ud;
+    for (int i=0;i<dnode_n;i++)
+        if (dnodes[i].kind==0 && dnodes[i].id[0] && strcmp(dnodes[i].id,id)==0) return i;
+    return -1;
+}
+static int br_create(void *ud, const char *tag)
+{
+    (void)ud;
+    int node = dom_new(0);
+    int k=0; for (;tag[k]&&k<19;k++) dnodes[node].tag[k]=tag[k]; dnodes[node].tag[k]=0;
+    return node;
+}
+static void br_append(void *ud, int p, int c) { (void)ud; if (p>=0&&p<dnode_n&&c>=0&&c<dnode_n) dom_add_child(p,c); }
+static void br_setinner(void *ud, int h, const char *s, int n)
+{
+    (void)ud; if (h<0||h>=dnode_n) return;
+    char *p = dsalloc(n+1); memcpy(p,s,n); p[n]=0;
+    dnodes[h].text=p; dnodes[h].tlen=n; dnodes[h].has_inner=1;
+}
+static void br_settext(void *ud, int h, const char *s, int n)
+{
+    (void)ud; if (h<0||h>=dnode_n) return;
+    /* escapam < > & ca sa fie text literal */
+    char *p = dsalloc(n*5+1); int o=0;
+    for (int i=0;i<n;i++) {
+        if (s[i]=='<'){memcpy(p+o,"&lt;",4);o+=4;}
+        else if (s[i]=='>'){memcpy(p+o,"&gt;",4);o+=4;}
+        else if (s[i]=='&'){memcpy(p+o,"&amp;",5);o+=5;}
+        else p[o++]=s[i];
+    }
+    p[o]=0; dnodes[h].text=p; dnodes[h].tlen=o; dnodes[h].has_inner=1;
+}
+static int br_getinner(void *ud, int h, char *buf, int cap)
+{
+    (void)ud; if (h<0||h>=dnode_n) return 0;
+    if (dnodes[h].has_inner) { int n=dnodes[h].tlen; if(n>cap-1)n=cap-1; memcpy(buf,dnodes[h].text,n); return n; }
+    char *sb=ser_buf; int sp=ser_pos, sc=ser_cap;
+    ser_buf=buf; ser_pos=0; ser_cap=cap;
+    for (int c=dnodes[h].child;c>=0;c=dnodes[c].sib) ser_node(c);
+    int r=ser_pos;
+    ser_buf=sb; ser_pos=sp; ser_cap=sc;
+    return r;
+}
+static void br_setattr(void *ud, int h, const char *k, const char *v)
+{
+    (void)ud; if (h<0||h>=dnode_n) return;
+    int vl=(int)strlen(v);
+    if (strcmp(k,"style")==0) { char*p=dsalloc(vl+1); memcpy(p,v,vl); p[vl]=0; dnodes[h].ov_style=p; dnodes[h].ov_style_len=vl; return; }
+    if (strcmp(k,"class")==0) { char*p=dsalloc(vl+1); memcpy(p,v,vl); p[vl]=0; dnodes[h].ov_class=p; dnodes[h].ov_class_len=vl; return; }
+    if (strcmp(k,"id")==0) { int m=vl; if(m>47)m=47; memcpy(dnodes[h].id,v,m); dnodes[h].id[m]=0; return; }
+    /* alt atribut: adaugam in extra */
+    if (!dnodes[h].extra) { dnodes[h].extra=dsalloc(256); dnodes[h].elen=0; }
+    int kl=(int)strlen(k);
+    if (dnodes[h].elen + kl + vl + 5 < 256) {
+        char *e=dnodes[h].extra; int o=dnodes[h].elen;
+        e[o++]=' '; memcpy(e+o,k,kl); o+=kl; e[o++]='='; e[o++]='"';
+        memcpy(e+o,v,vl); o+=vl; e[o++]='"'; dnodes[h].elen=o;
+    }
+}
+static void br_write(void *ud, const char *s, int n)
+{
+    (void)ud;
+    char *p = dsalloc(n+1); memcpy(p,s,n); p[n]=0;
+    int node = dom_new(2); dnodes[node].text=p; dnodes[node].tlen=n;
+    dom_add_child(dom_body_h, node);
+}
+static void br_jslog(void *ud, const char *s, int n) { (void)ud;(void)s;(void)n; }
+
+static struct js_dom_ops g_ops = {
+    0, br_write, br_getid, br_create, br_append,
+    br_setinner, br_getinner, br_settext, br_setattr, br_jslog, 0
+};
+
+static void run_scripts(void)
+{
+    if (nscripts == 0 || !js_arena) return;
+    g_ops.body = dom_body_h;
+    JS *J = js_create(js_arena, JS_ARENA);
+    js_set_dom(J, &g_ops);
+    js_reset(J);                   /* re-instaleaza globalele CU dom setat */
+    for (int i = 0; i < nscripts; i++)
+        js_eval(J, scripts[i].src, scripts[i].len);
+}
+
+/* construieste DOM, ruleaza scripturile, apoi aseaza pagina finala */
+static void render_page(const char *h, int n)
+{
+    if (!dnodes || !ser_all) { layout_html(h, n); return; }
+    dom_build(h, n);
+    run_scripts();
+    ser_buf = ser_all; ser_pos = 0; ser_cap = SER_CAP;
+    ser_node(0);
+    ser_all[ser_pos] = 0;
+    layout_html(ser_all, ser_pos);
 }
 
 /* ================= retea: descarcare HTTP ================= */
@@ -544,7 +1165,7 @@ static void do_fetch(const char *url0)
             if (html[k] == '\r' && html[k + 1] == '\n' &&
                 html[k + 2] == '\r' && html[k + 3] == '\n') { body = k + 4; break; }
 
-        layout_html(html + body, html_len - body);
+        render_page(html + body, html_len - body);
 
         strncpy(cur_url, url, sizeof(cur_url) - 1);
         cur_url[sizeof(cur_url) - 1] = '\0';
@@ -630,12 +1251,16 @@ static void browser_fwd(void)
 
 static const char *HOME =
     "<h1>MyOS Browser</h1>"
-    "<p>Scrie o adresa in bara de sus si apasa Enter. Merge HTTP si HTTPS.</p>"
+    "<p>Scrie o adresa in bara de sus si apasa Enter. Merge HTTP, HTTPS si JavaScript.</p>"
+    "<p id=\"jsdemo\">(JavaScript nu a rulat)</p>"
+    "<script>"
+    "document.getElementById('jsdemo').innerHTML = "
+    "'JavaScript ruleaza in MyOS! 6*7=' + (6*7) + ', sqrt(169)=' + Math.sqrt(169);"
+    "</script>"
     "<p>Exemple (click pe link):</p>"
     "<p><a href=\"https://example.com/\">https://example.com</a> - test HTTPS/TLS</p>"
     "<p><a href=\"http://info.cern.ch/\">http://info.cern.ch</a> - primul site web din lume</p>"
     "<p><a href=\"https://www.google.com/\">https://www.google.com</a></p>"
-    "<p><a href=\"http://httpforever.com/\">http://httpforever.com</a></p>"
     "<p>Comenzi: sagetile sus/jos = derulare, click pe bara = editezi adresa,"
     " Backspace (fara focus) = inapoi.</p>";
 
@@ -644,9 +1269,19 @@ void browser_init(void)
     uint64_t hp = pmm_alloc_contig((HTML_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
     uint64_t rp = pmm_alloc_contig((RUN_CAP * sizeof(struct run) + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
     uint64_t lp = pmm_alloc_contig((LINK_CAP * HREF_MAX + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t cp = pmm_alloc_contig((CSS_CAP * sizeof(struct cssrule) + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t dp = pmm_alloc_contig((DOM_MAX * sizeof(struct dnode) + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t sp2 = pmm_alloc_contig((DOM_SCR_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t jp = pmm_alloc_contig((JS_ARENA + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t serp = pmm_alloc_contig((SER_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
     html = (char *)hp;
     runs = (struct run *)rp;
     links = (char (*)[HREF_MAX])lp;
+    css = (struct cssrule *)cp;
+    dnodes = (struct dnode *)dp;
+    dom_scratch = (char *)sp2;
+    js_arena = (char *)jp;
+    ser_all = (char *)serp;
 
     strcpy(addr, "");
     addr_len = 0;
@@ -656,8 +1291,8 @@ void browser_init(void)
     hist_n = 1; hist_cur = 0;
     strcpy(status, "Gata.");
 
-    if (html && runs && links) {
-        layout_html(HOME, (int)strlen(HOME));
+    if (html && runs && links && css) {
+        render_page(HOME, (int)strlen(HOME));
         state = ST_DONE;
     } else {
         strcpy(status, "Memorie insuficienta pentru browser.");
@@ -746,7 +1381,7 @@ void browser_draw(int cx, int cy)
         fb_text(cx + BR_MARGIN, py + 20,
                 "Pagina nu contine text vizibil.", 0x606368, PAGE_BG);
         fb_text(cx + BR_MARGIN, py + 44,
-                "Probabil e construita cu JavaScript (neacceptat inca).",
+                "Poate folosi framework-uri JS mari sau functii web neacceptate.",
                 0x808388, PAGE_BG);
         fb_text(cx + BR_MARGIN, py + 68, status, 0xA0A4AC, PAGE_BG);
     } else {
@@ -754,14 +1389,20 @@ void browser_draw(int cx, int cy)
         for (int i = 0; i < run_n; i++) {
             struct run *r = &runs[i];
             int sy = py + r->y - scroll;
-            if (sy + 16 <= top || sy >= bot) continue;
+            if (sy + r->h <= top || sy >= bot) continue;
             int sx = cx + r->x;
-            fb_text(sx, sy, r->text, r->color, PAGE_BG);
-            if (r->bold) fb_text(sx + 1, sy, r->text, r->color, PAGE_BG);
-            if (r->link >= 0) {
-                int uw = (int)strlen(r->text) * 8;
-                fb_fill(sx, sy + 15, uw, 1, r->color);
+            if (r->bg) fb_fill(sx, sy, r->w, r->h, r->bg);
+            if (r->text[0] == '\0') continue;    /* ex. linia <hr> */
+            uint32_t tbg = r->bg ? r->bg : PAGE_BG;
+            if (r->scale > 1) {
+                fb_text_scaled(sx, sy, r->text, r->color, r->scale);
+                if (r->bold) fb_text_scaled(sx + 1, sy, r->text, r->color, r->scale);
+            } else {
+                fb_text(sx, sy, r->text, r->color, tbg);
+                if (r->bold) fb_text(sx + 1, sy, r->text, r->color, tbg);
             }
+            if (r->link >= 0)
+                fb_fill(sx, sy + r->h - 1, r->w, 1, r->color);
         }
         /* scrollbar */
         if (content_h > BR_PAGE_H) {
@@ -832,9 +1473,8 @@ void browser_click(int cx, int cy, int mx, int my)
         for (int i = 0; i < run_n; i++) {
             struct run *r = &runs[i];
             if (r->link < 0) continue;
-            int rw = (int)strlen(r->text) * 8;
-            if (rx >= r->x - 2 && rx < r->x + rw + 2 &&
-                content_y >= r->y - 2 && content_y < r->y + 18) {
+            if (rx >= r->x - 2 && rx < r->x + r->w + 2 &&
+                content_y >= r->y - 2 && content_y < r->y + r->h + 2) {
                 char full[300];
                 resolve_url(cur_url, links[r->link], full, sizeof(full));
                 browser_navigate(full);

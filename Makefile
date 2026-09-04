@@ -6,6 +6,11 @@ CFLAGS := -m64 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
           -fno-asynchronous-unwind-tables -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
           -O2 -Wall -Wextra
 
+# js.c foloseste double (numerele JS) -> are nevoie de SSE. Doar firul
+# browserului ruleaza JS, iar restul kernelului e -mno-sse, deci registrele
+# xmm nu sunt atinse de nimeni altcineva (nu trebuie salvate la context switch).
+CFLAGS_SSE := $(filter-out -mno-mmx -mno-sse -mno-sse2,$(CFLAGS)) -msse -msse2
+
 KOBJS := $(BUILD)/entry.o $(BUILD)/gdt.o $(BUILD)/isr.o \
          $(BUILD)/kernel.o $(BUILD)/kprintf.o $(BUILD)/vga.o $(BUILD)/serial.o \
          $(BUILD)/idt.o $(BUILD)/interrupts.o $(BUILD)/pic.o $(BUILD)/pit.o \
@@ -15,7 +20,7 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/gdt.o $(BUILD)/isr.o \
          $(BUILD)/elf.o $(BUILD)/pipe.o $(BUILD)/fb.o $(BUILD)/gui.o \
          $(BUILD)/mouse.o $(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/netstack.o \
          $(BUILD)/tcp.o $(BUILD)/browser.o $(BUILD)/sha256.o $(BUILD)/aes.o \
-         $(BUILD)/x25519.o $(BUILD)/tls.o
+         $(BUILD)/x25519.o $(BUILD)/tls.o $(BUILD)/js.o
 
 # Limite impuse de lantul de boot: stage1 citeste 192 de sectoare
 # (8 pentru stage2 + 184 pentru kernel).
@@ -87,6 +92,10 @@ $(BUILD)/fs.img: $(BUILD)/mkfs $(UELFS) $(BUILD)/hello.bin \
 
 $(BUILD)/%.o: kernel/%.c | $(BUILD)
 	gcc $(CFLAGS) -c $< -o $@
+
+# js.o compilat cu SSE (double)
+$(BUILD)/js.o: kernel/js.c kernel/js.h kernel/js_lib.h | $(BUILD)
+	gcc $(CFLAGS_SSE) -c $< -o $@
 
 $(KOBJS): $(wildcard kernel/*.h)
 

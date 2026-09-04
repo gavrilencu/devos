@@ -9,12 +9,15 @@ UDP/TCP), DNS, server telnet SI client TCP outbound. Iese pe internet!
 
 BROWSER WEB (Alt+F7 sau butonul cu glob din taskbar): scrie o adresa in bara
 de sus si apasa Enter, sau click pe un link. Merge HTTP si HTTPS (TLS 1.2 scris
-de la zero: x25519 + AES-GCM + SHA-256). Are inapoi/inainte/reload, istoric,
-word-wrap, titluri, linkuri clicabile si derulare (sagetile sus/jos).
-Bara de adresa: click ca sa pui cursorul unde vrei si editezi in loc; tastare
-directa (fara click) = adresa noua. Incearca https://example.com sau info.cern.ch.
-Nota: paginile construite complet cu JavaScript (ex. Google) se descarca dar nu
-se pot afisa - MyOS nu are motor JS.
+de la zero: x25519 + AES-GCM + SHA-256). Randare cu CSS: marimi de font, culori,
+fundaluri, aliniere, liste, bold, linkuri. Are si un MOTOR JAVASCRIPT propriu:
+ruleaza JS din pagini (variabile, functii, bucle, obiecte, array-uri, DOM -
+document.write, getElementById, innerHTML, createElement). Inapoi/inainte/reload,
+istoric, word-wrap, derulare. Bara de adresa: click ca sa pui cursorul unde vrei.
+Incearca https://example.com sau info.cern.ch.
+Nota onesta: motorul JS ruleaza JavaScript simplu/vanilla, NU framework-uri mari
+(V8/Chromium = milioane de linii). Site-urile care isi construiesc totul cu
+React/Angular etc. (ex. Google) se descarca dar nu se randeaza complet.
 
 Taskbar: buton Terminal (click = deschide/comuta; click dreapta = Terminal
 nou), File Manager (Alt+F4), Notepad (Alt+F5), Task Manager (Alt+F6),
