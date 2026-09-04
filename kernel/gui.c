@@ -2999,7 +2999,7 @@ static void set_panel_about(int cx, int cy)
     fb_text(px, cy + 156, "TLS, motor JS, browser grafic).", COL_DIM, SET_BG);
 
     fb_fill(px, cy + 184, WCONT_W - SET_SIDE_W - 60, 1, 0x2C3542);
-    fb_text(px, cy + 198, "Versiune:  v0.41", COL_DIM, SET_BG);
+    fb_text(px, cy + 198, "Versiune:  v0.42", COL_DIM, SET_BG);
     fb_text(px, cy + 220, "Dezvoltat de:", COL_DIM, SET_BG);
     fb_text_scaled(px, cy + 240, "Gavrilencu Grigore", 0xF2C14E, 2);
 
