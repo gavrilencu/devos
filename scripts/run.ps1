@@ -49,10 +49,14 @@ Write-Host "  ================================================================"
 Write-Host ""
 Write-Host "Pornesc MyOS ..."
 
-# -vga std: VGA standard (suporta VBE 1024x768x32, stabil pe Windows).
+# -vga std: VGA standard (VBE + interfata dispi Bochs: DevOS ruleaza Full HD
+#   1920x1080, comutabil din Setari). -full-screen: fereastra cat tot monitorul,
+#   ca sa se vada si taskbar-ul de jos (iesi cu Ctrl+Alt+F, elibereaza mouse-ul
+#   cu Ctrl+Alt+G). -display gtk,zoom-to-fit: scaleaza imaginea la ecran.
 # -netdev user + rtl8139: placa de retea (user-mode/SLIRP): MyOS primeste
 #   10.0.2.15, gateway 10.0.2.2. Portul 2323 din Windows -> 23 (telnet) in MyOS.
 $imgArg = 'file=' + $img + ',format=raw'
 & $qemu -m 256M -vga std -drive $imgArg `
+    -display gtk,zoom-to-fit=on -full-screen `
     -netdev user,id=net0,hostfwd=tcp::2323-:23 -device rtl8139,netdev=net0 `
     -serial stdio

@@ -1,10 +1,19 @@
-Salut! Acest text e citit de pe disc, prin driverul ATA al lui MyOS,
+Salut! Acest text e citit de pe disc, prin driverul ATA al lui DevOS,
 dintr-un sistem de fisiere scris de la zero (MyFS).
 
-RETEA: MyOS are placa de retea (RTL8139), stiva IP completa (ARP/IPv4/ICMP/
+ECRAN: DevOS ruleaza Full HD 1920x1080 (driver video propriu, prin
+interfata VBE dispi). Din meniul Start -> Setari -> Display poti schimba
+rezolutia la cald (1920x1080 / 1280x720 / 1024x768) sau cu tastele 1/2/3.
+
+MENIUL START: apasa butonul DevOS din stanga-jos SAU tasta Windows (Super).
+De acolo pornesti Terminal, Explorer, Editor, Task Manager, Browser, Setari
+si poti da Repornire sau Oprire. FERESTRE: butonul verde = maximizeaza
+(sau tasta F11), galben = minimizeaza, rosu = inchide (si termina procesele).
+
+RETEA: DevOS are placa de retea (RTL8139), stiva IP completa (ARP/IPv4/ICMP/
 UDP/TCP), DNS, server telnet SI client TCP outbound. Iese pe internet!
   - server telnet: de pe Windows  telnet localhost 2323  (sau PuTTY).
-  - in terminalul MyOS:  ping 10.0.2.2 ,  nslookup <nume> ,
+  - in terminalul DevOS:  ping 10.0.2.2 ,  nslookup <nume> ,
     telnet <gazda> [port]  (client, Ctrl+Q iese),  fetch <gazda> [cale]  (HTTP).
 
 BROWSER WEB (Alt+F7 sau butonul cu glob din taskbar): scrie o adresa in bara

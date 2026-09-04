@@ -9,7 +9,7 @@
 #include "string.h"
 #include "browser.h"
 
-#define TB_H 44                 /* inaltimea taskbar-ului */
+#define TB_H 54                 /* inaltimea taskbar-ului (stil Win11) */
 
 /* Paleta in stil Windows 11 (Fluent, dark): accent albastru, suprafete
  * "Mica" gri-albastrui, colturi rotunjite generos. */
@@ -28,11 +28,17 @@
 #define COL_CARD      0x2C313B  /* butoane/carduri */
 #define COL_CARD_HOV  0x39404B
 
-/* geometria ferestrelor: continut 640x400 (80x25 celule de 8x16) */
-#define WCONT_W 640
-#define WCONT_H 400
-#define WFRAME_W (WCONT_W + 4)
-#define WFRAME_H (WCONT_H + 34)          /* titlu 28 + margini */
+/* geometria ferestrelor: continut de baza 640x400 (80x25 celule de 8x16).
+ * Ferestrele pot fi maximizate: dimensiunea reala e per-fereastra (cwv/chv).
+ * In functiile de continut, WCONT_W/WCONT_H = dimensiunea ferestrei "curente"
+ * (g_curwin), setata la inceputul fiecarei functii de desen/hit-test. */
+#define WCONT_BASE_W 640
+#define WCONT_BASE_H 400
+#define WCONT_W cwv(g_curwin)
+#define WCONT_H chv(g_curwin)
+
+static int g_curwin;             /* fereastra pt. care se evalueaza WCONT_W/H */
+static int set_tab;              /* Setari: 0 = Display, 1 = Despre */
 
 static int W, H, tby;
 static int ready;
@@ -41,20 +47,86 @@ static int hover_id = -1;       /* -1 nimic, 0..2 tab, 10 = butonul MyOS */
 static int prev_btn;
 
 /* window manager: 0..2 = terminalele, 3 = File Manager, 4 = Notepad,
- * 5 = Task Manager. zord[0] = jos ... zord[NWIN-1] = deasupra. */
-#define NWIN   (CON_COUNT + 4)
+ * 5 = Task Manager, 6 = Browser, 7 = Setari. zord[0] = jos ... zord[NWIN-1] = deasupra. */
+#define NWIN   (CON_COUNT + 5)
 #define FM_WIN CON_COUNT
 #define NP_WIN (CON_COUNT + 1)
 #define TM_WIN (CON_COUNT + 2)
 #define BR_WIN (CON_COUNT + 3)
+#define SET_WIN (CON_COUNT + 4)
 
-static struct { int cx, cy; } wins[NWIN] = {
-    { 120, 70 }, { 190, 130 }, { 260, 190 }, { 230, 120 }, { 200, 100 },
-    { 170, 90 }, { 150, 80 },
+/* meniul Start (centrat, stil Windows 11) */
+#define MENU_W 540
+#define MENU_H 380
+#define MENU_X ((W - MENU_W) / 2)
+
+/* rezolutiile oferite in Setari (prima = maxima, setata la boot) */
+static const struct { int w, h; const char *label; } set_res[3] = {
+    { 1920, 1080, "1920 x 1080  Full HD" },
+    { 1280,  720, "1280 x 720   HD" },
+    { 1024,  768, "1024 x 768" },
 };
-static int zord[NWIN] = { 6, 5, 4, 3, 2, 1, 0 };
-static int win_vis[NWIN] = { 0, 0, 0, 0, 0, 0, 0 };  /* nimic pornit la boot */
+
+/* cw/ch = dimensiunea continutului (variabila: maximizare). Initializate
+ * la baza in gui_init_sizes(). scx/scy/scw/sch = geometria salvata la
+ * maximizare (pt. restaurare). maxed = 1 daca fereastra e maximizata. */
+static struct {
+    int cx, cy, cw, ch;
+    int maxed, scx, scy, scw, sch;
+} wins[NWIN] = {
+    { 120, 70 }, { 190, 130 }, { 260, 190 }, { 230, 120 }, { 200, 100 },
+    { 170, 90 }, { 150, 80 }, { 240, 110 },
+};
+static int zord[NWIN] = { 7, 6, 5, 4, 3, 2, 1, 0 };
+static int win_vis[NWIN] = { 0, 0, 0, 0, 0, 0, 0, 0 };  /* nimic pornit la boot */
 static int fwin = -1;                             /* fereastra focusata (-1 = nimic) */
+
+/* iconuri colorate (RGBA 40x40) incarcate de pe disc — librarie de iconuri
+ * randata pe host din fontul Segoe (vezi scripts/genicons.ps1). */
+#define ICON_PX   40                 /* dimensiunea unui icon */
+#define ICON_SLOT 8192               /* spatiu rezervat per icon (sectoare intregi) */
+enum { IC_TERMINAL, IC_EXPLORER, IC_EDITOR, IC_TASKMGR, IC_BROWSER,
+       IC_SETTINGS, IC_REBOOT, IC_POWER, IC_START, IC_COUNT };
+static const char *icon_files[IC_COUNT] = {
+    "ic_terminal.raw", "ic_explorer.raw", "ic_editor.raw", "ic_taskmgr.raw",
+    "ic_browser.raw", "ic_settings.raw", "ic_reboot.raw", "ic_power.raw",
+    "ic_start.raw",
+};
+static uint8_t *icons_buf;           /* buffer contiguu pt. toate iconurile */
+static int icons_ok;                 /* 1 daca s-au incarcat */
+
+static void load_icons(void)
+{
+    if (icons_buf)
+        return;
+    uint64_t phys = pmm_alloc_contig((IC_COUNT * ICON_SLOT + PMM_FRAME_SIZE - 1) /
+                                     PMM_FRAME_SIZE);
+    if (!phys)
+        return;
+    icons_buf = (uint8_t *)phys;
+    icons_ok = 1;
+    for (int i = 0; i < IC_COUNT; i++)
+        if (fs_read_into(icon_files[i], icons_buf + (uint64_t)i * ICON_SLOT,
+                         ICON_SLOT) != ICON_PX * ICON_PX * 4)
+            icons_ok = 0;
+}
+
+static const uint32_t *icon_px(int idx)
+{
+    if (!icons_ok || idx < 0 || idx >= IC_COUNT)
+        return 0;
+    return (const uint32_t *)(icons_buf + (uint64_t)idx * ICON_SLOT);
+}
+
+/* deseneaza un icon centrat intr-un patrat (cx,cy,side) */
+static void draw_icon_c(int cx, int cy, int side, int idx)
+{
+    const uint32_t *px = icon_px(idx);
+    if (!px)
+        return;
+    fb_blit_rgba(cx + (side - ICON_PX) / 2, cy + (side - ICON_PX) / 2,
+                 px, ICON_PX, ICON_PX);
+}
 
 static int drag_term = -1;      /* fereastra trasa cu mouse-ul */
 static int drag_dx, drag_dy;
@@ -74,18 +146,75 @@ static void dims(void)
     tby = H - TB_H;
 }
 
-/* incarca o imagine raw de pe disc in bufferul de wallpaper */
+/* aloca bufferul de wallpaper (WxHx4) daca nu exista deja */
+static int wall_alloc(void)
+{
+    if (wallpap)
+        return 1;
+    uint32_t bytes = (uint32_t)W * (uint32_t)H * 4u;
+    uint64_t phys = pmm_alloc_contig((bytes + PMM_FRAME_SIZE - 1) /
+                                     PMM_FRAME_SIZE);
+    if (phys == 0)
+        return 0;
+    wallpap = (uint32_t *)phys;
+    return 1;
+}
+
+/* incarca o imagine raw de pe disc in bufferul de wallpaper.
+ * Acceptam doar o imagine exact de dimensiunea ecranului (WxHx4). */
 static int load_bg(const char *name)
 {
+    if (!wall_alloc())
+        return 0;
     uint32_t bytes = (uint32_t)W * (uint32_t)H * 4u;
-    if (!wallpap) {
-        uint64_t phys = pmm_alloc_contig((bytes + PMM_FRAME_SIZE - 1) /
-                                         PMM_FRAME_SIZE);
-        if (phys == 0)
-            return 0;
-        wallpap = (uint32_t *)phys;
+    return fs_read_into(name, wallpap, bytes) == (int64_t)bytes;
+}
+
+/* fundal procedural modern: gradient inchis + halou radial + vigneta.
+ * Generat o singura data in `wallpap` (independent de rezolutie). */
+static void wall_generate(void)
+{
+    int gx = W * 3 / 10, gy = H / 4;      /* centrul haloului */
+    int vx = W / 2, vy = H / 2;           /* centrul vignetei */
+    for (int y = 0; y < H; y++) {
+        int t = y * 255 / (H > 0 ? H : 1);
+        int r0 = 0x12 - (0x0A * t) / 255;
+        int g0 = 0x1A - (0x10 * t) / 255;
+        int b0 = 0x2E - (0x1C * t) / 255;
+        uint32_t *row = wallpap + (uint64_t)y * W;
+        for (int x = 0; x < W; x++) {
+            int dx = x - gx, dy = y - gy;
+            int glow = 46 - (dx * dx + dy * dy) / 16000;
+            if (glow < 0) glow = 0;
+            int wx = x - vx, wy = y - vy;
+            int vig = (wx * wx + wy * wy) / 60000;
+            int r = r0 + glow / 2 - vig / 3;
+            int g = g0 + (glow * 2) / 3 - vig / 3;
+            int b = b0 + glow - vig / 2;
+            if (r < 0) r = 0; else if (r > 255) r = 255;
+            if (g < 0) g = 0; else if (g > 255) g = 255;
+            if (b < 0) b = 0; else if (b > 255) b = 255;
+            row[x] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
     }
-    return fs_read_into(name, wallpap, bytes) > 0;
+}
+
+/* pregateste `wallpap` pentru desktop: imaginea de pe disc daca se
+ * potriveste exact, altfel fundalul procedural. Cache-uit pentru W/H curent. */
+static int wall_prepared;
+static void wall_prepare(void)
+{
+    if (wall_prepared)
+        return;
+    if (!wall_alloc()) {
+        desk_bg = 0;
+        return;
+    }
+    uint32_t bytes = (uint32_t)W * (uint32_t)H * 4u;
+    if (fs_read_into("desk.raw", wallpap, bytes) != (int64_t)bytes)
+        wall_generate();
+    desk_bg = 1;
+    wall_prepared = 1;
 }
 
 /* adancimea repaint-urilor imbricate: la 0 suntem "top-level" si putem
@@ -99,11 +228,20 @@ static void term_btn_draw(int hov);
 static void tm_btn_draw(int hov);
 static void tm_content_draw(void);
 static void br_btn_draw(int hov);
+static void set_tb_draw(int hov);
 int gui_terminal_count(void);
 static volatile int term_req = -1;  /* -1 nimic, -2 primul liber, 0..N anume */
 static void fm_button(int i, int hov);
 static void fm_arrow(int down, int hov);
 static void fm_content_draw(void);
+
+/* Setari (definit mai jos) */
+static int  win_at(int x, int y);
+static void set_content_draw(void);
+static void set_content_click(int mx, int my);
+static void gui_set_resolution(int w, int h);
+static int  set_hover_at(int x, int y);
+static void set_btn_row(int idx, int hov);
 
 /* Notepad (definit mai jos) */
 static void np_open_window(const char *name);
@@ -169,6 +307,18 @@ static const uint16_t ic_chart[16] = {  /* Task Manager: grafic de bare */
 static const uint16_t ic_globe[16] = {  /* Browser: glob cu meridiane */
     0x0000, 0x07E0, 0x0DB0, 0x1998, 0x318C, 0x2184, 0x7FFE, 0x2184,
     0x2184, 0x318C, 0x1998, 0x0DB0, 0x07E0, 0x0000, 0x0000, 0x0000,
+};
+static const uint16_t ic_gear[16] = {   /* Setari: rotita dintata */
+    0x0180, 0x0180, 0x0DB0, 0x7FFE, 0x3FFC, 0x1FF8, 0x1E78, 0x3C3C,
+    0x3C3C, 0x1E78, 0x1FF8, 0x3FFC, 0x7FFE, 0x0DB0, 0x0180, 0x0180,
+};
+static const uint16_t ic_power[16] = {  /* Oprire: simbol power */
+    0x0180, 0x0180, 0x0180, 0x0180, 0x3DBC, 0x6DB6, 0xCDB3, 0xCC03,
+    0xCC03, 0xCDB3, 0x6C36, 0x3C3C, 0x0FF0, 0x0000, 0x0000, 0x0000,
+};
+static const uint16_t ic_reboot[16] = { /* Repornire: sageata circulara */
+    0x0000, 0x0FE0, 0x1FF8, 0x3838, 0x600C, 0x6006, 0x000E, 0x003F,
+    0x001E, 0x600C, 0x6006, 0x300C, 0x1C38, 0x0FF0, 0x0000, 0x0000,
 };
 
 static void icon16(int x, int y, const uint16_t *ic, uint32_t color)
@@ -242,10 +392,10 @@ void splash_show(void)
             uint32_t b = (uint32_t)(0x26 - (0x18 * t) / 255);
             fb_fill(0, y, W, 1, (r << 16) | (g << 8) | b);
         }
-        int lw = 4 * 8 * 7;
+        int lw = 5 * 8 * 7;
         int lx = (W - lw) / 2, ly = H / 2 - 170;
-        fb_text_scaled(lx + 4, ly + 4, "MyOS", 0x101E3A, 7);
-        fb_text_scaled(lx, ly, "MyOS", COL_ACCENT, 7);
+        fb_text_scaled(lx + 4, ly + 4, "DevOS", 0x101E3A, 7);
+        fb_text_scaled(lx, ly, "DevOS", COL_ACCENT, 7);
         sp_spin_cy = H / 2 + 20;
         sp_bar_y   = H / 2 + 96;
     }
@@ -342,29 +492,86 @@ static void wallpaper_rect(int x, int y, int w, int h)
     }
 }
 
-static void start_button(int hov)
+/* ---- taskbar centrat, stil Windows 11, cu iconuri colorate ---- */
+#define TB_N    7
+#define TB_SLOT 52
+#define TB_BTN  44
+static const int tb_id[TB_N]   = { 10, 50, FM_WIN, NP_WIN, TM_WIN, BR_WIN, SET_WIN };
+static const int tb_icon[TB_N] = { IC_START, IC_TERMINAL, IC_EXPLORER, IC_EDITOR,
+                                   IC_TASKMGR, IC_BROWSER, IC_SETTINGS };
+
+static int tb_start_x(void) { return (W - TB_N * TB_SLOT) / 2; }
+
+static void tb_slot_rect(int i, int *x, int *y, int *w, int *h)
 {
-    uint32_t bg = hov ? 0x3A78D8 : 0x2E68C8;
-    fb_fill_round2(6, tby + 7, 84, 30, 15, bg, 1, COL_TASKBAR);
-    icon16(18, tby + 14, ic_logo, 0xFFFFFF);
-    fb_text(40, tby + 14, "MyOS", COL_TEXT, bg);
+    *x = tb_start_x() + i * TB_SLOT + (TB_SLOT - TB_BTN) / 2;
+    *y = tby + (TB_H - TB_BTN) / 2;
+    *w = TB_BTN;
+    *h = TB_BTN;
 }
+
+static int tb_active(int i)
+{
+    int id = tb_id[i];
+    if (id == 10) return menu_open;
+    if (id == 50) return gui_terminal_count() > 0;
+    return win_vis[id];
+}
+
+static void tb_draw_slot(int i, int hov)
+{
+    if (!fb_active())
+        return;
+    int x, y, w, h;
+    tb_slot_rect(i, &x, &y, &w, &h);
+    int sx = x - (TB_SLOT - TB_BTN) / 2;
+    fb_fill(sx, tby + 1, TB_SLOT, TB_H - 1, COL_TASKBAR);   /* curata slotul */
+    int act = tb_active(i);
+    if (hov || act) {
+        uint32_t bg = hov ? 0x3A414E : 0x2C323C;
+        fb_fill_round2(x, y, w, h, 12, bg, 1, COL_TASKBAR);
+    }
+    draw_icon_c(x, y, w, tb_icon[i]);
+    if (act && tb_id[i] != 10) {       /* indicator Win11 sub aplicatia activa */
+        int focused = (tb_id[i] == 50) ? (fwin >= 0 && fwin < CON_COUNT)
+                                       : (fwin == tb_id[i]);
+        int lw = focused ? 18 : 8;
+        fb_fill_round2(x + (w - lw) / 2, tby + TB_H - 5, lw, 3, 1,
+                       COL_ACCENT_HI, 1, COL_TASKBAR);
+    }
+}
+
+static int tb_slot_of_id(int id)
+{
+    for (int i = 0; i < TB_N; i++)
+        if (tb_id[i] == id)
+            return i;
+    return -1;
+}
+
+static void tb_draw_by_id(int id, int hov)
+{
+    int i = tb_slot_of_id(id);
+    if (i >= 0)
+        tb_draw_slot(i, hov);
+}
+
+/* wrappere pastrate pentru apelurile existente */
+static void start_button(int hov) { tb_draw_by_id(10, hov); }
 
 void desktop_draw(int active_term)
 {
     if (!fb_active())
         return;
     dims();
-    desk_bg = load_bg("desk.raw");    /* wallpaper-ul utilizatorului */
+    load_icons();
+    wall_prepare();                   /* wallpaper: disc daca se potriveste, altfel procedural */
     wallpaper_rect(0, 0, W, tby);
     fb_fill(0, tby, W, TB_H, COL_TASKBAR);
-    fb_fill(0, tby, W, 2, COL_TASKBAR_2);
+    fb_fill(0, tby, W, 1, COL_TASKBAR_2);
     (void)active_term;
-    start_button(0);
-    term_btn_draw(0);
-    fm_tb_draw(0);
-    np_tb_draw(0);
-    tm_btn_draw(0);
+    for (int i = 0; i < TB_N; i++)
+        tb_draw_slot(i, hover_id == tb_id[i]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -373,12 +580,16 @@ void desktop_draw(int active_term)
 int gui_win_x(int term) { return wins[term].cx; }
 int gui_win_y(int term) { return wins[term].cy; }
 
+/* dimensiunea continutului ferestrei t (0 in structura = dimensiunea de baza) */
+static int cwv(int t) { return wins[t].cw ? wins[t].cw : WCONT_BASE_W; }
+static int chv(int t) { return wins[t].ch ? wins[t].ch : WCONT_BASE_H; }
+
 static void win_full_rect(int t, int *x, int *y, int *w, int *h)
 {
     *x = wins[t].cx - 2;
     *y = wins[t].cy - 30;
-    *w = WFRAME_W;
-    *h = WFRAME_H;
+    *w = cwv(t) + 4;
+    *h = chv(t) + 34;
 }
 
 static int rect_hit(int x, int y, int rx, int ry, int rw, int rh)
@@ -416,7 +627,7 @@ int gui_cell_visible(int term, int px, int py)
             return 0;
     }
     /* sau de meniul Start (mereu deasupra)? */
-    if (menu_open && rect_isect(px, py, 8, 16, 6, tby - 156, 180, 150))
+    if (menu_open && rect_isect(px, py, 8, 16, MENU_X, tby - MENU_H - 6, MENU_W, MENU_H))
         return 0;
     return 1;
 }
@@ -452,16 +663,21 @@ static void title_draw(int t)
             tt[k] = '\0';
         }
         fb_text(cx + 34, cy - 24, tt, focused ? COL_TEXT : COL_DIM, bg);
+    } else if (t == SET_WIN) {
+        icon16(cx + 10, cy - 24, ic_gear, focused ? 0xCFD8E4 : COL_DIM);
+        fb_text(cx + 34, cy - 24, "Setari",
+                focused ? COL_TEXT : COL_DIM, bg);
     } else {
         icon16(cx + 10, cy - 24, ic_term, focused ? COL_ACCENT_HI : COL_DIM);
-        char title[32] = "Terminal MyOS - F ";
-        title[17] = (char)('1' + t);
+        char title[32] = "Terminal DevOS - F ";
+        title[18] = (char)('1' + t);
         fb_text(cx + 34, cy - 24, title, focused ? COL_TEXT : COL_DIM, bg);
     }
     /* butoane rotunde (cercuri cu AA pe fundalul cunoscut al titlului) */
-    fb_fill_round2(cx + WFRAME_W - 26, cy - 22, 12, 12, 6, 0xE0554D, 1, bg);
-    fb_fill_round2(cx + WFRAME_W - 44, cy - 22, 12, 12, 6, 0xE0B04D, 1, bg);
-    fb_fill_round2(cx + WFRAME_W - 62, cy - 22, 12, 12, 6, 0x58C15A, 1, bg);
+    int frw = cwv(t) + 4;
+    fb_fill_round2(cx + frw - 26, cy - 22, 12, 12, 6, 0xE0554D, 1, bg);
+    fb_fill_round2(cx + frw - 44, cy - 22, 12, 12, 6, 0xE0B04D, 1, bg);
+    fb_fill_round2(cx + frw - 62, cy - 22, 12, 12, 6, 0x58C15A, 1, bg);
 }
 
 static void repaint_rect(int x, int y, int w, int h, int skip);
@@ -474,19 +690,21 @@ static void win_draw(int t)
     int cx = wins[t].cx, cy = wins[t].cy;
     int focused = (t == fwin);
     int fx = cx - 2, fy = cy - 30;
+    int frw = cwv(t) + 4, frh = chv(t) + 34;
     uint32_t bg = focused ? COL_TITLE_F : COL_TITLE_U;
 
     if (repaint_depth == 0) {
         /* AA determinist: restauram intai fundalul din colturi (wallpaper
          * sau ferestrele de sub noi), apoi rama se amesteca cu el */
         repaint_rect(fx, fy, 10, 10, t);
-        repaint_rect(fx + WFRAME_W - 10, fy, 10, 10, t);
-        repaint_rect(fx, fy + WFRAME_H - 10, 10, 10, t);
-        repaint_rect(fx + WFRAME_W - 10, fy + WFRAME_H - 10, 10, 10, t);
-        fb_fill_round2(fx, fy, WFRAME_W, WFRAME_H, 10, bg, 2, 0);
+        repaint_rect(fx + frw - 10, fy, 10, 10, t);
+        repaint_rect(fx, fy + frh - 10, 10, 10, t);
+        repaint_rect(fx + frw - 10, fy + frh - 10, 10, 10, t);
+        fb_fill_round2(fx, fy, frw, frh, 10, bg, 2, 0);
     } else {
-        fb_fill_round2(fx, fy, WFRAME_W, WFRAME_H, 10, bg, 0, 0);
+        fb_fill_round2(fx, fy, frw, frh, 10, bg, 0, 0);
     }
+    g_curwin = t;
     title_draw(t);
     if (t == FM_WIN)
         fm_content_draw();
@@ -494,8 +712,12 @@ static void win_draw(int t)
         np_content_draw();
     else if (t == TM_WIN)
         tm_content_draw();
-    else if (t == BR_WIN)
+    else if (t == BR_WIN) {
+        browser_set_size(cwv(BR_WIN), chv(BR_WIN));
         browser_draw(cx, cy);
+    }
+    else if (t == SET_WIN)
+        set_content_draw();
     else
         console_repaint_term(t);
 }
@@ -521,7 +743,7 @@ static void repaint_rect(int x, int y, int w, int h, int skip)
         if (rect_isect(x, y, w, h, wx, wy, ww, wh))
             win_draw(t);
     }
-    if (menu_open && rect_isect(x, y, w, h, 6, tby - 156, 180, 150))
+    if (menu_open && rect_isect(x, y, w, h, MENU_X, tby - MENU_H - 6, MENU_W, MENU_H))
         menu_draw();
     fb_clear_clip();
     repaint_depth--;
@@ -548,11 +770,13 @@ static void focus_window(int t)
         if (win_vis[zord[i]])
             win_draw(zord[i]);
 
+    start_button(hover_id == 10);
     term_btn_draw(hover_id == 50);
     fm_tb_draw(hover_id == FM_WIN);
     np_tb_draw(hover_id == NP_WIN);
     tm_btn_draw(hover_id == TM_WIN);
     br_btn_draw(hover_id == BR_WIN);
+    set_tb_draw(hover_id == SET_WIN);
     gui_clock();
 }
 
@@ -607,6 +831,7 @@ static void focus_top_visible(void)
 static void hide_win(int t, int definitive)
 {
     win_vis[t] = 0;
+    wins[t].maxed = 0;                 /* iese din maximizare la inchidere/minimizare */
     int x, y, w, h;
     win_full_rect(t, &x, &y, &w, &h);
     repaint_rect(x, y, w, h, -1);
@@ -631,12 +856,71 @@ static void send_back(int t)
     focus_top_visible();
 }
 
+/* rosu = inchide fereastra complet; pentru terminale, termina si procesele
+ * utilizator care ruleaza pe ele. */
+static void close_win(int t)
+{
+    if (t < CON_COUNT) {
+        struct task_info info;
+        for (int i = 0; i < task_count_max(); i++)
+            if (task_get_info(i, &info) && info.term == t)
+                task_kill_id(i);
+    }
+    hide_win(t, 1);          /* win_vis=0, curata terminalul, iese din maximizare */
+}
+
+/* verde = maximizeaza / restaureaza fereastra */
+static void toggle_maximize(int t)
+{
+    if (wins[t].maxed) {
+        wins[t].cx = wins[t].scx; wins[t].cy = wins[t].scy;
+        wins[t].cw = wins[t].scw; wins[t].ch = wins[t].sch;
+        wins[t].maxed = 0;
+    } else {
+        wins[t].scx = wins[t].cx; wins[t].scy = wins[t].cy;
+        wins[t].scw = wins[t].cw; wins[t].sch = wins[t].ch;
+        wins[t].cx = 6;          wins[t].cy = 40;
+        wins[t].cw = W - 12;     wins[t].ch = tby - 50;
+        wins[t].maxed = 1;
+    }
+    /* redesenare completa: fundal + toate ferestrele (dimensiuni schimbate) */
+    desktop_draw(0);
+    for (int i = 0; i < NWIN; i++)
+        if (win_vis[zord[i]])
+            win_draw(zord[i]);
+    gui_clock();
+}
+
+/* ------------------------------------------------------------------ */
+/* Oprire / repornire */
+
+static void power_reboot(void)
+{
+    /* reset prin controllerul 8042: pulsul liniei de reset a CPU-ului */
+    uint8_t t = 0x02;
+    while (t & 0x02)
+        t = inb(0x64);
+    outb(0x64, 0xFE);
+    /* daca n-a mers, triple fault: IDT invalid + int */
+    __asm__ volatile("cli");
+    struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idt0 = { 0, 0 };
+    __asm__ volatile("lidt %0; int3" : : "m"(idt0));
+    for (;;) __asm__ volatile("hlt");
+}
+
+static void power_shutdown(void)
+{
+    /* ACPI shutdown pe QEMU/Bochs (porturi cunoscute) */
+    outw(0x604, 0x2000);     /* QEMU >= 2.0 */
+    outw(0xB004, 0x2000);    /* Bochs / QEMU vechi */
+    outw(0x600, 0x2000);     /* cloud-hypervisor */
+    /* daca nu s-a oprit, oprim procesorul */
+    __asm__ volatile("cli");
+    for (;;) __asm__ volatile("hlt");
+}
+
 /* ------------------------------------------------------------------ */
 /* Meniul Start */
-
-#define MENU_X 6
-#define MENU_W 180
-#define MENU_H 150
 
 static void fmt_u(char *dst, uint64_t v)
 {
@@ -652,47 +936,117 @@ static void fmt_u(char *dst, uint64_t v)
     dst[p] = '\0';
 }
 
+/* elementele meniului Start (launcher). Id de hover = 80 + index. */
+#define MENU_N    8
+#define MENU_APPS 6
+static const char *menu_labels[MENU_N] = {
+    "Terminal", "Explorer", "Editor", "Task Manager", "Browser", "Setari",
+    "Repornire", "Oprire",
+};
+static const int menu_app_icon[MENU_N] = {
+    IC_TERMINAL, IC_EXPLORER, IC_EDITOR, IC_TASKMGR, IC_BROWSER, IC_SETTINGS,
+    IC_REBOOT, IC_POWER,
+};
+
+/* dreptunghiul elementului `idx` (0..5 = grid aplicatii, 6=reboot, 7=power) */
+static void menu_item_rect(int idx, int *x, int *y, int *w, int *h)
+{
+    int my0 = tby - MENU_H - 6;
+    if (idx < MENU_APPS) {
+        int cw = (MENU_W - 60) / 3;
+        int col = idx % 3, row = idx / 3;
+        *x = MENU_X + 30 + col * cw;
+        *y = my0 + 84 + row * 108;
+        *w = cw - 12;
+        *h = 98;
+    } else {
+        int k = idx - 6;            /* 0=reboot, 1=power */
+        *x = MENU_X + MENU_W - 30 - (2 - k) * 52;
+        *y = my0 + MENU_H - 54;
+        *w = 44;
+        *h = 42;
+    }
+}
+
+static void menu_item_draw(int idx, int hov)
+{
+    int bx, by, bw, bh;
+    menu_item_rect(idx, &bx, &by, &bw, &bh);
+    if (idx < MENU_APPS) {
+        if (hov)
+            fb_fill_round2(bx, by, bw, bh, 12, COL_CARD_HOV, 1, COL_MENU);
+        else
+            fb_fill_round2(bx, by, bw, bh, 12, COL_MENU, 1, COL_MENU);
+        draw_icon_c(bx + (bw - ICON_PX) / 2, by + 12, ICON_PX, menu_app_icon[idx]);
+        const char *lb = menu_labels[idx];
+        int tw = (int)strlen(lb) * 8;
+        uint32_t lbg = hov ? COL_CARD_HOV : COL_MENU;
+        fb_text(bx + (bw - tw) / 2, by + bh - 26, lb, COL_TEXT, lbg);
+    } else {
+        uint32_t bg = hov ? COL_CARD_HOV : COL_MENU;
+        fb_fill_round2(bx, by, bw, bh, 12, bg, 1, COL_MENU);
+        draw_icon_c(bx, by + 1, bw, menu_app_icon[idx]);
+    }
+}
+
 static void menu_draw(void)
 {
     int my0 = tby - MENU_H - 6;
-    fb_fill_round2(MENU_X, my0, MENU_W, MENU_H, 12, COL_MENU, 2, 0);
-    fb_fill(MENU_X + 12, my0 + 34, MENU_W - 24, 1, 0x2C3542);
+    fb_fill_round2(MENU_X, my0, MENU_W, MENU_H, 16, COL_MENU, 2, 0);
 
-    icon16(MENU_X + 12, my0 + 10, ic_logo, COL_ACCENT);
-    fb_text(MENU_X + 36, my0 + 10, "MyOS v0.34", COL_TEXT, COL_MENU);
+    draw_icon_c(MENU_X + 24, my0 + 18, 34, IC_START);
+    fb_text_scaled(MENU_X + 64, my0 + 22, "DevOS", COL_TEXT, 2);
+    fb_text(MENU_X + 24, my0 + 60, "Aplicatii", COL_DIM, COL_MENU);
 
-    char num[24], line[32];
-    int p;
+    for (int i = 0; i < MENU_APPS; i++)
+        menu_item_draw(i, hover_id == 80 + i);
 
-    icon16(MENU_X + 12, my0 + 46, ic_clock, COL_DIM);
-    fmt_u(num, pit_ticks() / 100);
-    p = 0;
-    const char *u = "uptime: ";
-    while (*u) line[p++] = *u++;
-    for (int i = 0; num[i]; i++) line[p++] = num[i];
-    line[p++] = 's';
-    line[p] = 0;
-    fb_text(MENU_X + 36, my0 + 46, line, COL_DIM, COL_MENU);
+    fb_fill(MENU_X + 24, my0 + MENU_H - 66, MENU_W - 48, 1, 0x2C3542);
+    fb_text(MENU_X + 24, my0 + MENU_H - 44, "Gavrilencu Grigore", COL_DIM, COL_MENU);
+    menu_item_draw(6, hover_id == 86);
+    menu_item_draw(7, hover_id == 87);
+}
 
-    icon16(MENU_X + 12, my0 + 72, ic_chip, COL_DIM);
-    fmt_u(num, pmm_free_bytes() / (1024 * 1024));
-    p = 0;
-    for (int i = 0; num[i]; i++) line[p++] = num[i];
-    const char *m = " MiB liberi";
-    while (*m) line[p++] = *m++;
-    line[p] = 0;
-    fb_text(MENU_X + 36, my0 + 72, line, COL_DIM, COL_MENU);
-
-    icon16(MENU_X + 12, my0 + 98, ic_term, COL_DIM);
-    fb_text(MENU_X + 36, my0 + 98, "3 terminale", COL_DIM, COL_MENU);
-
-    fb_text(MENU_X + 12, my0 + 126, "trage ferestrele!", 0x6B7A94, COL_MENU);
+static int menu_hover_at(int x, int y)
+{
+    if (!menu_open)
+        return -1;
+    for (int i = 0; i < MENU_N; i++) {
+        int bx, by, bw, bh;
+        menu_item_rect(i, &bx, &by, &bw, &bh);
+        if (rect_hit(x, y, bx, by, bw, bh))
+            return 80 + i;
+    }
+    return -1;
 }
 
 static void menu_close(void)
 {
     menu_open = 0;
     repaint_rect(MENU_X, tby - MENU_H - 6, MENU_W, MENU_H, -1);
+}
+
+/* lanseaza aplicatia / actiunea aleasa din meniul Start */
+static void menu_action(int idx)
+{
+    menu_close();
+    switch (idx) {
+    case 0:                         /* Terminal */
+        if (gui_terminal_count() == 0) {
+            term_req = -2;
+        } else {
+            for (int k = 0; k < CON_COUNT; k++)
+                if (win_vis[k]) { focus_window(k); break; }
+        }
+        break;
+    case 1: gui_fm_toggle();  break; /* Explorer */
+    case 2: gui_np_toggle();  break; /* Editor */
+    case 3: gui_tm_toggle();  break; /* Task Manager */
+    case 4: gui_br_toggle();  break; /* Browser */
+    case 5: gui_set_toggle(); break; /* Setari */
+    case 6: power_reboot();   break; /* Repornire */
+    case 7: power_shutdown(); break; /* Oprire */
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -860,6 +1214,7 @@ static int name_has_dot(const char *s)
 
 static void fm_status_draw(void)
 {
+    g_curwin = FM_WIN;
     int cx = wins[FM_WIN].cx, cy = wins[FM_WIN].cy;
     int sy = cy + WCONT_H - 26;
     fb_fill(cx, sy, WCONT_W, 26, 0x141821);
@@ -939,6 +1294,7 @@ static void fm_side_item(int i, int hov)
 
 static void fm_arrow(int down, int hov)
 {
+    g_curwin = FM_WIN;
     int cx = wins[FM_WIN].cx, cy = wins[FM_WIN].cy;
     int x = cx + WCONT_W - 30;
     int y = down ? cy + WCONT_H - 26 - 24 : cy + 66;
@@ -949,6 +1305,7 @@ static void fm_arrow(int down, int hov)
 
 static void fm_content_draw(void)
 {
+    g_curwin = FM_WIN;
     fm_build();
     int cx = wins[FM_WIN].cx, cy = wins[FM_WIN].cy;
 
@@ -1075,87 +1432,24 @@ static void fm_copy(void)
     fm_content_draw();
 }
 
-/* butonul File Manager din taskbar (langa tab-urile F1..F3) */
-static void fm_tb_draw(int hov)
-{
-    int x = 210;
-    int on = win_vis[FM_WIN];
-    uint32_t bg = (on && fwin == FM_WIN)
-                      ? COL_ACCENT
-                      : (hov ? COL_TAB_HOV : COL_TAB);
-    fb_fill_round2(x, tby + 7, 44, 30, 15, bg, 1, COL_TASKBAR);
-    icon16(x + 14, tby + 14, ic_folder, on ? 0xF0C060 : 0x8DA0B8);
-    if (on && fwin == FM_WIN)
-        fb_fill_round2(x + 12, tby + 33, 20, 3, 1, 0xFFFFFF, 1, bg);
-}
-
-/* butonul Notepad din taskbar */
-static void np_tb_draw(int hov)
-{
-    int x = 264;
-    int on = win_vis[NP_WIN];
-    uint32_t bg = (on && fwin == NP_WIN)
-                      ? COL_ACCENT
-                      : (hov ? COL_TAB_HOV : COL_TAB);
-    fb_fill_round2(x, tby + 7, 44, 30, 15, bg, 1, COL_TASKBAR);
-    icon16(x + 14, tby + 14, ic_note, on ? 0x8FD0FF : 0x8DA0B8);
-    if (on && fwin == NP_WIN)
-        fb_fill_round2(x + 12, tby + 33, 20, 3, 1, 0xFFFFFF, 1, bg);
-}
-
-/* butonul Terminal (unic) din taskbar: arata cate terminale sunt deschise */
-static void term_btn_draw(int hov)
-{
-    int x = 100, w = 100, on = gui_terminal_count();
-    int focused = (fwin >= 0 && fwin < CON_COUNT);
-    uint32_t bg = (on && focused) ? COL_ACCENT : (hov ? COL_TAB_HOV : COL_TAB);
-    fb_fill_round2(x, tby + 7, w, 30, 15, bg, 1, COL_TASKBAR);
-    icon16(x + 8, tby + 14, ic_term, on ? 0xA8E0A8 : 0x8DA0B8);
-    fb_text(x + 30, tby + 14, "Terminal", COL_TEXT, bg);
-    if (on > 1) {                    /* contor cand sunt mai multe deschise */
-        char n[2] = { (char)('0' + on), 0 };
-        fb_fill_round2(x + w - 18, tby + 4, 14, 14, 7, 0x30363F, 1, COL_TASKBAR);
-        fb_text(x + w - 13, tby + 6, n, COL_ACCENT_HI, 0x30363F);
-    }
-    if (on && focused)
-        fb_fill_round2(x + 38, tby + 33, 24, 3, 1, 0xFFFFFF, 1, bg);
-}
-
-/* butonul Task Manager din taskbar */
-static void tm_btn_draw(int hov)
-{
-    int x = 318;
-    int on = win_vis[TM_WIN];
-    uint32_t bg = (on && fwin == TM_WIN)
-                      ? COL_ACCENT
-                      : (hov ? COL_TAB_HOV : COL_TAB);
-    fb_fill_round2(x, tby + 7, 44, 30, 15, bg, 1, COL_TASKBAR);
-    icon16(x + 14, tby + 14, ic_chart, on ? 0x9FE0B0 : 0x8DA0B8);
-    if (on && fwin == TM_WIN)
-        fb_fill_round2(x + 12, tby + 33, 20, 3, 1, 0xFFFFFF, 1, bg);
-}
-
-/* butonul Browser din taskbar */
-static void br_btn_draw(int hov)
-{
-    int x = 372;
-    int on = win_vis[BR_WIN];
-    uint32_t bg = (on && fwin == BR_WIN)
-                      ? COL_ACCENT
-                      : (hov ? COL_TAB_HOV : COL_TAB);
-    fb_fill_round2(x, tby + 7, 44, 30, 15, bg, 1, COL_TASKBAR);
-    icon16(x + 14, tby + 14, ic_globe, on ? 0x6FB4FF : 0x8DA0B8);
-    if (on && fwin == BR_WIN)
-        fb_fill_round2(x + 12, tby + 33, 20, 3, 1, 0xFFFFFF, 1, bg);
-}
+/* butoanele din taskbar: acum sunt sloturi centrate cu iconuri colorate;
+ * pastram numele vechi ca wrappere spre tb_draw_by_id. */
+static void fm_tb_draw(int hov)   { tb_draw_by_id(FM_WIN, hov); }
+static void np_tb_draw(int hov)   { tb_draw_by_id(NP_WIN, hov); }
+static void term_btn_draw(int hov){ tb_draw_by_id(50, hov); }
+static void tm_btn_draw(int hov)  { tb_draw_by_id(TM_WIN, hov); }
+static void br_btn_draw(int hov)  { tb_draw_by_id(BR_WIN, hov); }
+static void set_tb_draw(int hov)  { tb_draw_by_id(SET_WIN, hov); }
 
 static void taskbar_refresh(void)
 {
+    start_button(hover_id == 10);
     term_btn_draw(hover_id == 50);
     fm_tb_draw(hover_id == FM_WIN);
     np_tb_draw(hover_id == NP_WIN);
     tm_btn_draw(hover_id == TM_WIN);
     br_btn_draw(hover_id == BR_WIN);
+    set_tb_draw(hover_id == SET_WIN);
 }
 
 /* urca un nivel in ierarhie (taie ultimul segment din fm_path) */
@@ -1338,6 +1632,7 @@ static void fm_action(int id)
 /* randul listei de sub punctul (mx,my), sau -1 */
 static int fm_row_at(int mx, int my)
 {
+    g_curwin = FM_WIN;
     int cx = wins[FM_WIN].cx, cy = wins[FM_WIN].cy;
     int ry = cy + 66;
     if (my < ry || my >= ry + FM_ROWS * 22 ||
@@ -1524,11 +1819,53 @@ void gui_br_toggle(void)
         focus_window(BR_WIN);
 }
 
+/* tasta Windows/Super: deschide/inchide meniul Start */
+void gui_menu_toggle(void)
+{
+    if (!fb_active() || !ready)
+        return;
+    if (menu_open)
+        menu_close();
+    else {
+        menu_open = 1;
+        menu_draw();
+    }
+}
+
+/* F11: maximizeaza / restaureaza fereastra focusata */
+void gui_maximize_focused(void)
+{
+    if (!fb_active() || !ready)
+        return;
+    if (fwin >= 0 && fwin < NWIN && win_vis[fwin])
+        toggle_maximize(fwin);
+}
+
+void gui_set_toggle(void)
+{
+    if (!fb_active() || !ready)
+        return;
+    if (!win_vis[SET_WIN]) {
+        win_vis[SET_WIN] = 1;
+        win_open_anim(SET_WIN);
+        focus_window(SET_WIN);
+    } else if (fwin == SET_WIN)
+        hide_win(SET_WIN, 0);
+    else
+        focus_window(SET_WIN);
+}
+
 /* redeseneaza continutul browserului cand firul de retea a terminat */
 void gui_refresh_browser(void)
 {
-    if (fb_active() && ready && win_vis[BR_WIN] && browser_poll_dirty())
+    if (!fb_active() || !ready)
+        return;
+    if (win_vis[BR_WIN] && browser_poll_dirty())
         browser_draw(wins[BR_WIN].cx, wins[BR_WIN].cy);
+    /* Task Manager live: reimprospatam lista de procese des (nou proces
+     * aparut / proces terminat / kill) daca fereastra e sus si vizibila */
+    if (win_vis[TM_WIN] && fwin == TM_WIN)
+        tm_content_draw();
 }
 
 /* --- Management terminale (deschise la cerere, nu la boot) --- */
@@ -1617,7 +1954,7 @@ static int win_at(int x, int y)
         if (!win_vis[t])
             continue;
         if (rect_hit(x, y, wins[t].cx - 2, wins[t].cy - 30,
-                     WFRAME_W, WFRAME_H))
+                     cwv(t) + 4, chv(t) + 34))
             return t;
     }
     return -1;
@@ -1628,6 +1965,7 @@ static int fm_hover_at(int x, int y)
 {
     if (!win_vis[FM_WIN] || win_at(x, y) != FM_WIN)
         return -1;
+    g_curwin = FM_WIN;
     int cx = wins[FM_WIN].cx, cy = wins[FM_WIN].cy;
 
     for (int i = 0; i < 5; i++) {
@@ -1664,6 +2002,17 @@ int gui_key_intercept(char ch)
     /* Notepad focusat: primeste toate tastele (editare libera) */
     if (fb_active() && ready && fwin == NP_WIN && win_vis[NP_WIN])
         return np_key(ch);
+
+    /* Setari focusat: 1/2/3 = rezolutie (in tabul Display), d/a = taburi */
+    if (fb_active() && ready && fwin == SET_WIN && win_vis[SET_WIN]) {
+        if (ch == 'd' || ch == 'a') {
+            int nt = (ch == 'd') ? 0 : 1;
+            if (set_tab != nt) { set_tab = nt; set_content_draw(); }
+        } else if (ch >= '1' && ch <= '3' && set_tab == 0) {
+            gui_set_resolution(set_res[ch - '1'].w, set_res[ch - '1'].h);
+        }
+        return 1;
+    }
 
     if (!fb_active() || !ready || fwin != FM_WIN || !win_vis[FM_WIN])
         return 0;
@@ -1892,6 +2241,7 @@ static void np_toolbar_btn(int i, int hov)
 
 static void np_content_draw(void)
 {
+    g_curwin = NP_WIN;
     int cx = wins[NP_WIN].cx, cy = wins[NP_WIN].cy;
     title_draw(NP_WIN);          /* titlul reflecta numele + starea "modificat" */
     np_layout();
@@ -2325,6 +2675,7 @@ static void tm_fmt(char *dst, uint32_t v)   /* numar zecimal */
 
 static void tm_content_draw(void)
 {
+    g_curwin = TM_WIN;
     int cx = wins[TM_WIN].cx, cy = wins[TM_WIN].cy;
 
     fb_fill(cx, cy, WCONT_W, WCONT_H, 0x1B1F26);
@@ -2420,6 +2771,7 @@ static void tm_content_draw(void)
 /* randul de proces sub (mx,my) → id-ul task-ului, sau -1 */
 static int tm_row_at(int mx, int my)
 {
+    g_curwin = TM_WIN;
     int cx = wins[TM_WIN].cx, cy = wins[TM_WIN].cy;
     int ry = cy + 66;
     if (my < ry || my >= ry + TM_ROWS * 22 ||
@@ -2440,6 +2792,7 @@ static int tm_row_at(int mx, int my)
 
 static void tm_content_click(int mx, int my)
 {
+    g_curwin = TM_WIN;
     int cx = wins[TM_WIN].cx, cy = wins[TM_WIN].cy;
     int by = cy + WCONT_H - 34;
     if (rect_hit(mx, my, cx + WCONT_W - 150, by + 5, 140, 24)) {
@@ -2515,21 +2868,15 @@ void gui_status_right(const char *s)
 
 static int hit_taskbar(int x, int y)
 {
-    if (y >= tby + 7 && y <= tby + 37) {
-        if (x >= 6 && x <= 90)
-            return 10;             /* MyOS */
-        if (x >= 100 && x <= 200)
-            return 50;             /* butonul Terminal */
-        if (x >= 210 && x <= 254)
-            return FM_WIN;
-        if (x >= 264 && x <= 308)
-            return NP_WIN;
-        if (x >= 318 && x <= 362)
-            return TM_WIN;
-        if (x >= 372 && x <= 416)
-            return BR_WIN;
-    }
-    return -1;
+    if (y < tby || y >= tby + TB_H)
+        return -1;
+    int sx = tb_start_x();
+    if (x < sx || x >= sx + TB_N * TB_SLOT)
+        return -1;
+    int i = (x - sx) / TB_SLOT;
+    if (i < 0 || i >= TB_N)
+        return -1;
+    return tb_id[i];               /* 10=Start,50=Terminal,FM/NP/TM/BR/SET_WIN */
 }
 
 /* butonul "Termina task" din Task Manager */
@@ -2537,6 +2884,7 @@ static int tm_hover_at(int x, int y)
 {
     if (!win_vis[TM_WIN] || win_at(x, y) != TM_WIN)
         return -1;
+    g_curwin = TM_WIN;
     int cx = wins[TM_WIN].cx, cy = wins[TM_WIN].cy;
     int by = cy + WCONT_H - 34;
     if (rect_hit(x, y, cx + WCONT_W - 150, by + 5, 140, 24))
@@ -2556,12 +2904,206 @@ static int np_hover_at(int x, int y)
     return -1;
 }
 
-static void clamp_win(int *cx, int *cy)
+static void clamp_win(int t, int *cx, int *cy)
 {
+    int cw = cwv(t), ch = chv(t);
     if (*cx < 4) *cx = 4;
-    if (*cx > W - WCONT_W - 4) *cx = W - WCONT_W - 4;
+    if (*cx > W - cw - 4) *cx = W - cw - 4;
     if (*cy < 34) *cy = 34;
-    if (*cy > tby - WCONT_H - 10) *cy = tby - WCONT_H - 10;
+    if (*cy > tby - ch - 10) *cy = tby - ch - 10;
+}
+
+/* ------------------------------------------------------------------ */
+/* Setari (fereastra SET_WIN): sectiunile Display si Despre */
+
+#define SET_SIDE_W 150
+#define SET_BG     0x161A22
+
+/* dreptunghiul unui buton de rezolutie (in panoul Display) */
+static void set_btn_rect(int idx, int *x, int *y, int *w, int *h)
+{
+    int cx = wins[SET_WIN].cx, cy = wins[SET_WIN].cy;
+    *x = cx + SET_SIDE_W + 30;
+    *y = cy + 96 + idx * 50;
+    *w = 300;
+    *h = 42;
+}
+
+/* dreptunghiul unui tab din bara laterala (0 = Display, 1 = Despre) */
+static void set_tab_rect(int idx, int *x, int *y, int *w, int *h)
+{
+    int cx = wins[SET_WIN].cx, cy = wins[SET_WIN].cy;
+    *x = cx + 10;
+    *y = cy + 60 + idx * 40;
+    *w = SET_SIDE_W - 20;
+    *h = 34;
+}
+
+static void set_btn_row(int idx, int hov)
+{
+    if (!win_vis[SET_WIN] || set_tab != 0)
+        return;
+    int bx, by, bw, bh;
+    set_btn_rect(idx, &bx, &by, &bw, &bh);
+    int cur   = (fb_width() == set_res[idx].w && fb_height() == set_res[idx].h);
+    int avail = (set_res[idx].w <= fb_max_width() &&
+                 set_res[idx].h <= fb_max_height());
+    uint32_t bg = cur ? COL_ACCENT
+                      : ((hov && avail) ? COL_CARD_HOV : COL_CARD);
+    fb_fill_round2(bx, by, bw, bh, 8, bg, 1, SET_BG);
+    uint32_t fg = cur ? 0xFFFFFF : (avail ? COL_TEXT : 0x5A6472);
+    fb_text(bx + 16, by + (bh - 16) / 2, set_res[idx].label, fg, bg);
+    if (cur)
+        fb_text(bx + bw - 52, by + (bh - 16) / 2, "activ", 0xFFFFFF, bg);
+    else if (!avail)
+        fb_text(bx + bw - 96, by + (bh - 16) / 2, "indisponibil", 0x5A6472, bg);
+}
+
+static void set_tab_draw(int idx, int hov)
+{
+    if (!win_vis[SET_WIN])
+        return;
+    int bx, by, bw, bh;
+    set_tab_rect(idx, &bx, &by, &bw, &bh);
+    int active = (set_tab == idx);
+    uint32_t bg = active ? COL_ACCENT : (hov ? COL_CARD_HOV : 0x12151C);
+    fb_fill_round2(bx, by, bw, bh, 8, bg, 1, 0x12151C);
+    icon16(bx + 8, by + 9, idx == 0 ? ic_chart : ic_gear,
+           active ? 0xFFFFFF : COL_DIM);
+    fb_text(bx + 34, by + 9, idx == 0 ? "Display" : "Despre",
+            active ? 0xFFFFFF : COL_TEXT, bg);
+}
+
+/* panoul Display: alegerea rezolutiei */
+static void set_panel_display(int cx, int cy)
+{
+    fb_text_scaled(cx + SET_SIDE_W + 30, cy + 24, "Display", COL_TEXT, 2);
+    fb_fill(cx + SET_SIDE_W + 30, cy + 58, WCONT_W - SET_SIDE_W - 60, 1, 0x2C3542);
+    fb_text(cx + SET_SIDE_W + 30, cy + 72, "Rezolutie ecran:", COL_DIM, SET_BG);
+    for (int i = 0; i < 3; i++)
+        set_btn_row(i, hover_id == 70 + i);
+    fb_text(cx + SET_SIDE_W + 30, cy + WCONT_H - 34,
+            "Rezolutia se aplica imediat (tastele 1/2/3).", 0x6B7A94, SET_BG);
+}
+
+/* panoul Despre: informatii sistem + dezvoltator */
+static void set_panel_about(int cx, int cy)
+{
+    int px = cx + SET_SIDE_W + 30;
+    fb_text_scaled(px, cy + 24, "Despre", COL_TEXT, 2);
+    fb_fill(px, cy + 58, WCONT_W - SET_SIDE_W - 60, 1, 0x2C3542);
+
+    fb_text_scaled(px, cy + 76, "DevOS", COL_ACCENT_HI, 3);
+    fb_text(px, cy + 116, "Developer OS - sistem de operare x86-64", COL_TEXT, SET_BG);
+    fb_text(px, cy + 138, "scris de la zero (bootloader, kernel, retea,", COL_DIM, SET_BG);
+    fb_text(px, cy + 156, "TLS, motor JS, browser grafic).", COL_DIM, SET_BG);
+
+    fb_fill(px, cy + 184, WCONT_W - SET_SIDE_W - 60, 1, 0x2C3542);
+    fb_text(px, cy + 198, "Versiune:  v0.41", COL_DIM, SET_BG);
+    fb_text(px, cy + 220, "Dezvoltat de:", COL_DIM, SET_BG);
+    fb_text_scaled(px, cy + 240, "Gavrilencu Grigore", 0xF2C14E, 2);
+
+    char num[24], line[48];
+    int p;
+    p = 0; const char *mm = "RAM liber:  ";
+    while (*mm) line[p++] = *mm++;
+    fmt_u(num, pmm_free_bytes() / (1024 * 1024));
+    for (int i = 0; num[i]; i++) line[p++] = num[i];
+    const char *mb = " MiB";
+    for (int i = 0; mb[i]; i++) line[p++] = mb[i];
+    line[p] = 0;
+    fb_text(px, cy + 280, line, COL_DIM, SET_BG);
+
+    p = 0; const char *up = "Uptime:     ";
+    while (*up) line[p++] = *up++;
+    fmt_u(num, pit_ticks() / 100);
+    for (int i = 0; num[i]; i++) line[p++] = num[i];
+    line[p++] = 's'; line[p] = 0;
+    fb_text(px, cy + 300, line, COL_DIM, SET_BG);
+}
+
+static void set_content_draw(void)
+{
+    g_curwin = SET_WIN;
+    int cx = wins[SET_WIN].cx, cy = wins[SET_WIN].cy;
+    fb_fill(cx, cy, WCONT_W, WCONT_H, SET_BG);
+    /* bara laterala */
+    fb_fill(cx, cy, SET_SIDE_W, WCONT_H, 0x12151C);
+    icon16(cx + 12, cy + 20, ic_gear, COL_ACCENT_HI);
+    fb_text(cx + 36, cy + 20, "Setari", COL_TEXT, 0x12151C);
+    for (int i = 0; i < 2; i++)
+        set_tab_draw(i, hover_id == 74 + i);
+
+    if (set_tab == 0)
+        set_panel_display(cx, cy);
+    else
+        set_panel_about(cx, cy);
+}
+
+static int set_hover_at(int x, int y)
+{
+    if (!win_vis[SET_WIN] || win_at(x, y) != SET_WIN)
+        return -1;
+    for (int i = 0; i < 2; i++) {
+        int bx, by, bw, bh;
+        set_tab_rect(i, &bx, &by, &bw, &bh);
+        if (rect_hit(x, y, bx, by, bw, bh))
+            return 74 + i;
+    }
+    if (set_tab == 0)
+        for (int i = 0; i < 3; i++) {
+            int bx, by, bw, bh;
+            set_btn_rect(i, &bx, &by, &bw, &bh);
+            if (rect_hit(x, y, bx, by, bw, bh))
+                return 70 + i;
+        }
+    return -1;
+}
+
+static void gui_set_resolution(int w, int h)
+{
+    if (w == fb_width() && h == fb_height())
+        return;
+    if (!fb_set_mode(w, h))
+        return;
+    wall_prepared = 0;                 /* regenereaza fundalul la noua dimensiune */
+    dims();                            /* actualizeaza W, H, tby */
+    for (int i = 0; i < NWIN; i++) {
+        if (wins[i].maxed) {           /* re-maximizeaza la noua rezolutie */
+            wins[i].cx = 6;  wins[i].cy = 40;
+            wins[i].cw = W - 12;  wins[i].ch = tby - 50;
+        }
+        clamp_win(i, &wins[i].cx, &wins[i].cy);
+    }
+    desktop_draw(0);                   /* wallpaper + taskbar */
+    for (int i = 0; i < NWIN; i++)     /* ferestrele vizibile, de jos in sus */
+        if (win_vis[zord[i]])
+            win_draw(zord[i]);
+    gui_clock();
+}
+
+static void set_content_click(int mx, int my)
+{
+    for (int i = 0; i < 2; i++) {       /* taburi */
+        int bx, by, bw, bh;
+        set_tab_rect(i, &bx, &by, &bw, &bh);
+        if (rect_hit(mx, my, bx, by, bw, bh)) {
+            if (set_tab != i) {
+                set_tab = i;
+                set_content_draw();
+            }
+            return;
+        }
+    }
+    if (set_tab == 0)                   /* butoane rezolutie */
+        for (int i = 0; i < 3; i++) {
+            int bx, by, bw, bh;
+            set_btn_rect(i, &bx, &by, &bw, &bh);
+            if (rect_hit(mx, my, bx, by, bw, bh)) {
+                gui_set_resolution(set_res[i].w, set_res[i].h);
+                return;
+            }
+        }
 }
 
 void gui_pointer(int x, int y, int buttons)
@@ -2588,7 +3130,7 @@ void gui_pointer(int x, int y, int buttons)
             drag_term = -1;
         } else {
             int nx = x - drag_dx, ny = y - drag_dy;
-            clamp_win(&nx, &ny);
+            clamp_win(drag_term, &nx, &ny);
             int t = drag_term;
             int ddx = nx - wins[t].cx;
             int ddy = ny - wins[t].cy;
@@ -2641,11 +3183,15 @@ void gui_pointer(int x, int y, int buttons)
 
     int h = hit_taskbar(x, y);
     if (h < 0)
+        h = menu_hover_at(x, y);
+    if (h < 0)
         h = fm_hover_at(x, y);
     if (h < 0)
         h = np_hover_at(x, y);
     if (h < 0)
         h = tm_hover_at(x, y);
+    if (h < 0)
+        h = set_hover_at(x, y);
     if (h != hover_id) {
         int old = hover_id;
         hover_id = h;
@@ -2661,6 +3207,8 @@ void gui_pointer(int x, int y, int buttons)
             tm_btn_draw(h == TM_WIN);
         if (old == BR_WIN || h == BR_WIN)
             br_btn_draw(h == BR_WIN);
+        if (old == SET_WIN || h == SET_WIN)
+            set_tb_draw(h == SET_WIN);
         if (old >= 20 && old <= 24)
             fm_button(old - 20, 0);
         if (h >= 20 && h <= 24)
@@ -2679,6 +3227,20 @@ void gui_pointer(int x, int y, int buttons)
             np_toolbar_btn(h - 40, 1);
         if ((old == 60 || h == 60) && win_vis[TM_WIN])
             tm_content_draw();     /* re-hover butonul Kill */
+        if (old >= 70 && old <= 72)
+            set_btn_row(old - 70, 0);
+        if (h >= 70 && h <= 72)
+            set_btn_row(h - 70, 1);
+        if (old >= 74 && old <= 75)
+            set_tab_draw(old - 74, 0);
+        if (h >= 74 && h <= 75)
+            set_tab_draw(h - 74, 1);
+        if (menu_open) {
+            if (old >= 80 && old <= 87)
+                menu_item_draw(old - 80, 0);
+            if (h >= 80 && h <= 87)
+                menu_item_draw(h - 80, 1);
+        }
     }
 
     int clicked  = (buttons & 1) && !(prev_btn & 1);
@@ -2768,8 +3330,14 @@ void gui_pointer(int x, int y, int buttons)
                 hide_win(NP_WIN, 0);
             else
                 focus_window(NP_WIN);
+        } else if (h == SET_WIN) {      /* iconul Setari din taskbar */
+            if (menu_open)
+                menu_close();
+            gui_set_toggle();
         } else if (h >= 40 && h <= 42) {
             np_toolbar_action(h - 40);
+        } else if (h >= 80 && h <= 87) {   /* element din meniul Start */
+            menu_action(h - 80);
         } else if (h == 10) {
             if (menu_open)
                 menu_close();
@@ -2789,36 +3357,39 @@ void gui_pointer(int x, int y, int buttons)
                 if (!win_vis[t])
                     continue;
                 int cx = wins[t].cx, cy = wins[t].cy;
+                int frw = cwv(t) + 4, frh = chv(t) + 34;
 
-                /* butoanele din titlu: rosu=inchide, galben=minimizeaza,
-                 * verde=trimite in fundal */
-                if (rect_hit(x, y, cx + WFRAME_W - 28, cy - 24, 16, 16)) {
-                    hide_win(t, 1);
+                /* butoanele din titlu: rosu=inchide (+kill), galben=minimizeaza,
+                 * verde=maximizeaza/restaureaza */
+                if (rect_hit(x, y, cx + frw - 28, cy - 24, 16, 16)) {
+                    close_win(t);
                     break;
                 }
-                if (rect_hit(x, y, cx + WFRAME_W - 46, cy - 24, 16, 16)) {
+                if (rect_hit(x, y, cx + frw - 46, cy - 24, 16, 16)) {
                     hide_win(t, 0);
                     break;
                 }
-                if (rect_hit(x, y, cx + WFRAME_W - 64, cy - 24, 16, 16)) {
-                    send_back(t);
+                if (rect_hit(x, y, cx + frw - 64, cy - 24, 16, 16)) {
+                    toggle_maximize(t);
                     break;
                 }
 
-                if (rect_hit(x, y, cx - 2, cy - 30, WFRAME_W, 28)) {
+                if (rect_hit(x, y, cx - 2, cy - 30, frw, 28)) {
                     focus_window(t);        /* focus + ridicare */
-                    drag_term = t;          /* si incepem tragerea */
-                    drag_dx = x - wins[t].cx;
-                    drag_dy = y - wins[t].cy;
+                    if (!wins[t].maxed) {   /* ferestrele maximizate nu se trag */
+                        drag_term = t;
+                        drag_dx = x - wins[t].cx;
+                        drag_dy = y - wins[t].cy;
+                    }
                     break;
                 }
-                if (rect_hit(x, y, cx - 2, cy - 30, WFRAME_W, WFRAME_H)) {
+                if (rect_hit(x, y, cx - 2, cy - 30, frw, frh)) {
                     if (t != fwin)
                         focus_window(t);
                     if (t == FM_WIN)
                         fm_content_click(x, y);
                     else if (t == NP_WIN &&
-                             y >= cy + NP_TY && y < cy + WCONT_H - 22)
+                             y >= cy + NP_TY && y < cy + chv(NP_WIN) - 22)
                         np_content_click(x, y);
                     else if (t == TM_WIN)
                         tm_content_click(x, y);
@@ -2826,6 +3397,8 @@ void gui_pointer(int x, int y, int buttons)
                         browser_click(cx, cy, x, y);
                         win_draw(BR_WIN);
                     }
+                    else if (t == SET_WIN)
+                        set_content_click(x, y);
                     break;
                 }
             }

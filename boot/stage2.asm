@@ -30,8 +30,10 @@ VBE_SAVE    equ 0x5F00
 VBE_CTRL    equ 0x7000          ; buffer info controller (512 B)
 VBE_MODE    equ 0x7200          ; buffer info mod (256 B)
 FONT_ADDR   equ 0x6000          ; fontul 8x16 al BIOS-ului, copiat aici (4 KiB)
-GFX_W       equ 1024
+GFX_W       equ 1024        ; mod VBE standard folosit doar ca sa aflam LFB
 GFX_H       equ 768
+PREF_W      equ 1920        ; rezolutia dorita (Full HD), setata prin dispi
+PREF_H      equ 1080
 
 CODE32_SEL  equ 0x08
 DATA_SEL    equ 0x10
@@ -134,6 +136,34 @@ stage2:
     mov byte [VBE_SAVE+7], 1
 .vbe_done:
 
+    ; --- Full HD prin interfata Bochs VBE dispi (QEMU/Bochs stdvga).
+    ; Am deja adresa LFB din modul VBE de mai sus; dispi reprogrameaza doar
+    ; rezolutia (aceeasi adresa fizica de framebuffer). Daca dispi lipseste
+    ; sau nu accepta, ramanem pe modul VBE deja setat.
+    cmp byte [VBE_SAVE+7], 1
+    jne .dispi_done
+    mov dx, 0x01CE                  ; index ID
+    xor ax, ax
+    out dx, ax
+    mov dx, 0x01CF
+    in ax, dx
+    cmp ax, 0xB0C0                  ; semnatura dispi (0xB0C0..0xB0C5)
+    jb .dispi_done
+    cmp ax, 0xB0C5
+    ja .dispi_done
+    call dispi_set                  ; incearca PREF_W x PREF_H
+    mov dx, 0x01CE                  ; recitim XRES ca sa confirmam
+    mov ax, 1
+    out dx, ax
+    mov dx, 0x01CF
+    in ax, dx
+    cmp ax, PREF_W
+    jne .dispi_done
+    mov word [VBE_SAVE+0], PREF_W   ; parametrii noi pentru kernel
+    mov word [VBE_SAVE+2], PREF_H
+    mov word [VBE_SAVE+4], PREF_W*4 ; pitch = latime * 4 (32bpp)
+.dispi_done:
+
     ; Activam linia A20 (metoda "fast A20", portul 0x92).
     ; Grija la bitul 0: scris cu 1 ar reseta procesorul.
     in al, 0x92
@@ -159,6 +189,38 @@ print16:
     int 0x10
     jmp .loop
 .done:
+    ret
+
+; Scrie un registru dispi: BX=index, CX=valoare
+dispi_reg:
+    mov dx, 0x01CE
+    mov ax, bx
+    out dx, ax
+    mov dx, 0x01CF
+    mov ax, cx
+    out dx, ax
+    ret
+
+; Seteaza modul dispi la PREF_W x PREF_H, 32bpp, LFB activ
+dispi_set:
+    mov bx, 4                   ; ENABLE = 0 (dezactiveaza)
+    xor cx, cx
+    call dispi_reg
+    mov bx, 1                   ; XRES
+    mov cx, PREF_W
+    call dispi_reg
+    mov bx, 2                   ; YRES
+    mov cx, PREF_H
+    call dispi_reg
+    mov bx, 3                   ; BPP
+    mov cx, 32
+    call dispi_reg
+    mov bx, 6                   ; VIRT_WIDTH = XRES (pitch = latime*4)
+    mov cx, PREF_W
+    call dispi_reg
+    mov bx, 4                   ; ENABLE = ENABLED | LFB
+    mov cx, 0x41
+    call dispi_reg
     ret
 
 msg_stage2: db "MyOS stage2: trec in long mode...", 13, 10, 0

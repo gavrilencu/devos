@@ -14,14 +14,14 @@
 #include "task.h"
 
 /* ---- geometrie (continut 640x400, ca celelalte ferestre) ---- */
-#define BR_W 640
-#define BR_H 400
+static int br_w = 640;             /* dimensiunea continutului (variabila: maximizare) */
+static int br_h = 400;
 #define BR_TOOL 40
 #define BR_STAT 22
-#define BR_PAGE_H (BR_H - BR_TOOL - BR_STAT)
+#define BR_PAGE_H (br_h - BR_TOOL - BR_STAT)
 #define BR_LINE 18
 #define BR_MARGIN 12
-#define BR_RIGHT (BR_W - BR_MARGIN - 14)   /* lasa loc de scrollbar */
+#define BR_RIGHT (br_w - BR_MARGIN - 14)   /* lasa loc de scrollbar */
 
 /* ---- culori ---- */
 #define TOOL_BG  0x2A2E36
@@ -639,7 +639,7 @@ static int fetch_url_binary(const char *url, uint8_t *out, int cap)
     for (const char *s = path; *s; s++) req[q++] = *s;
     const char *m = " HTTP/1.0\r\nHost: "; while (*m) req[q++] = *m++;
     for (const char *s = host; *s; s++) req[q++] = *s;
-    const char *e = "\r\nUser-Agent: MyOS-Browser/1.0\r\nConnection: close\r\n\r\n";
+    const char *e = "\r\nUser-Agent: DevOS-Browser/1.0\r\nConnection: close\r\n\r\n";
     while (*e) req[q++] = *e++;
     if (tls) tls_send(hc, req, q); else tcp_csend(hc, req, q);
 
@@ -1285,6 +1285,24 @@ static void relayout(void)
     dirty = 1;
 }
 
+/* schimba dimensiunea zonei de continut (maximizare/restaurare/rezolutie)
+ * si reface aranjarea paginii ca textul sa se re-incadreze pe noua latime. */
+void browser_set_size(int w, int h)
+{
+    if (w < 320) w = 320;
+    if (h < 200) h = 200;
+    if (w == br_w && h == br_h)
+        return;
+    br_w = w;
+    br_h = h;
+    if (ser_len > 0)
+        layout_html(ser_all, ser_len);   /* re-incadreaza pe latimea noua */
+    int max = content_h - BR_PAGE_H;
+    if (scroll > max) scroll = max;
+    if (scroll < 0) scroll = 0;
+    dirty = 1;
+}
+
 /* ================= retea: descarcare HTTP ================= */
 
 /* gaseste un antet (case-insensitive) in sectiunea de antete; copiaza valoarea */
@@ -1403,7 +1421,7 @@ static int http_get(const char *url, int post, const char *body, int blen)
     for (const char *s = path; *s; s++) req[p++] = *s;
     const char *m = " HTTP/1.0\r\nHost: "; while (*m) req[p++] = *m++;
     for (const char *s = host; *s; s++) req[p++] = *s;
-    const char *ua = "\r\nUser-Agent: MyOS-Browser/1.0\r\nAccept: text/html\r\n";
+    const char *ua = "\r\nUser-Agent: DevOS-Browser/1.0\r\nAccept: text/html\r\n";
     while (*ua) req[p++] = *ua++;
     /* cookie pentru gazda (sesiune) */
     if (cookie_jar[0] && ci_eq(cookie_host, host, (int)strlen(cookie_host)+1)) {
@@ -1589,14 +1607,14 @@ static void browser_fwd(void)
 }
 
 static const char *HOME =
-    "<h1>MyOS Browser</h1>"
+    "<h1>DevOS Browser</h1>"
     "<p>Scrie o adresa in bara de sus si apasa Enter. Merge HTTP, HTTPS si JavaScript.</p>"
     "<p id=\"jsdemo\">(JavaScript nu a rulat)</p>"
     "<script>"
     "document.getElementById('jsdemo').innerHTML = "
-    "'JavaScript ruleaza in MyOS! 6*7=' + (6*7) + ', sqrt(169)=' + Math.sqrt(169);"
+    "'JavaScript ruleaza in DevOS! 6*7=' + (6*7) + ', sqrt(169)=' + Math.sqrt(169);"
     "</script>"
-    "<p>Imagine PNG (decodata de MyOS dintr-un data: URI):</p>"
+    "<p>Imagine PNG (decodata de DevOS dintr-un data: URI):</p>"
     "<img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFAAAAAwCAYAAACG5f33AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAACRSURBVGhD7dChAQIxEADBK+d1yqHOL4Ii0Gg6CB5H1o4Ys3Lnvdbm3PwG/mNgZGBkYGRgZGBkYGRgZGBkYGRgNOtem3MGRgZGBkYGRgZGBkYGRgZGBkYGRgZGsx6vzTkDIwMjAyMDIwMjAyMDIwMjAyMDIwOj+TyvzTkDIwMjAyMDIwMjAyMDIwMjAyMDIwOjL29uMJ0mi6joAAAAAElFTkSuQmCC\">"
     "<p>Exemple (click pe link):</p>"
     "<p><a href=\"https://example.com/\">https://example.com</a> - test HTTPS/TLS</p>"
@@ -1681,13 +1699,13 @@ static void draw_btn(int x, int y, int w, const char *label, int enabled)
 void browser_draw(int cx, int cy)
 {
     /* bara de unelte */
-    fb_fill(cx, cy, BR_W, BR_TOOL, TOOL_BG);
+    fb_fill(cx, cy, br_w, BR_TOOL, TOOL_BG);
     draw_btn(cx + 6, cy + 8, 26, "<", hist_cur > 0);
     draw_btn(cx + 34, cy + 8, 26, ">", hist_cur < hist_n - 1);
     draw_btn(cx + 62, cy + 8, 26, "R", 1);
 
     int ax = cx + 94;
-    int aw = BR_W - 94 - 52;
+    int aw = br_w - 94 - 52;
     fb_fill_round2(ax, cy + 8, aw, 24, 8, addr_focus ? 0xFFFFFF : 0x3A3F49, 1, TOOL_BG);
     int tx = ax + 8;
     int maxc = (aw - 16) / 8;
@@ -1713,12 +1731,12 @@ void browser_draw(int cx, int cy)
         fb_fill(cpos, cy + 11, 2, 18, 0x1284E4);
     }
 
-    fb_fill_round2(cx + BR_W - 50, cy + 8, 44, 24, 8, ACCENT, 1, TOOL_BG);
-    fb_text(cx + BR_W - 50 + 13, cy + 12, "Go", 0xFFFFFF, ACCENT);
+    fb_fill_round2(cx + br_w - 50, cy + 8, 44, 24, 8, ACCENT, 1, TOOL_BG);
+    fb_text(cx + br_w - 50 + 13, cy + 12, "Go", 0xFFFFFF, ACCENT);
 
     /* zona de pagina */
     int py = cy + BR_TOOL;
-    fb_fill(cx, py, BR_W, BR_PAGE_H, PAGE_BG);
+    fb_fill(cx, py, br_w, BR_PAGE_H, PAGE_BG);
 
     if (state == ST_LOADING) {
         fb_text(cx + BR_MARGIN, py + 20, "Se incarca...", 0x606368, PAGE_BG);
@@ -1803,7 +1821,7 @@ void browser_draw(int cx, int cy)
         }
         /* scrollbar */
         if (content_h > BR_PAGE_H) {
-            int trackx = cx + BR_W - 10;
+            int trackx = cx + br_w - 10;
             fb_fill(trackx, py, 8, BR_PAGE_H, 0xE8EAED);
             int th = BR_PAGE_H * BR_PAGE_H / content_h;
             if (th < 24) th = 24;
@@ -1814,9 +1832,9 @@ void browser_draw(int cx, int cy)
     }
 
     /* bara de stare */
-    int sy = cy + BR_H - BR_STAT;
-    fb_fill(cx, sy, BR_W, BR_STAT, TOOL_BG);
-    fb_fill(cx, sy, BR_W, 1, 0x14161B);
+    int sy = cy + br_h - BR_STAT;
+    fb_fill(cx, sy, br_w, BR_STAT, TOOL_BG);
+    fb_fill(cx, sy, br_w, 1, 0x14161B);
     fb_text(cx + 8, sy + 3, status, STAT_FG, TOOL_BG);
 }
 
@@ -1896,7 +1914,7 @@ void browser_click(int cx, int cy, int mx, int my)
         if (in_rect(rx, ry, 6, 8, 26, 24)) { browser_back(); return; }
         if (in_rect(rx, ry, 34, 8, 26, 24)) { browser_fwd(); return; }
         if (in_rect(rx, ry, 62, 8, 26, 24)) { browser_navigate(cur_url); return; }
-        int ax = 94, aw = BR_W - 94 - 52;
+        int ax = 94, aw = br_w - 94 - 52;
         if (in_rect(rx, ry, ax, 8, aw, 24)) {
             addr_focus = 1;
             int tx = ax + 8;
@@ -1908,14 +1926,14 @@ void browser_click(int cx, int cy, int mx, int my)
             dirty = 1;
             return;
         }
-        if (in_rect(rx, ry, BR_W - 50, 8, 44, 24)) {
+        if (in_rect(rx, ry, br_w - 50, 8, 44, 24)) {
             addr_focus = 0;
             browser_navigate(addr);
             return;
         }
         return;
     }
-    if (ry >= BR_H - BR_STAT) return;
+    if (ry >= br_h - BR_STAT) return;
 
     /* click in pagina: camp de formular sau link? */
     addr_focus = 0;

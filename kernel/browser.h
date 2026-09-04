@@ -9,6 +9,7 @@ void browser_navigate(const char *url);   /* incarca un URL (din bara sau un lin
 
 /* desenare + interactiune, chemate de gui.c cu originea continutului ferestrei */
 void browser_draw(int cx, int cy);
+void browser_set_size(int w, int h);      /* redimensioneaza continutul (maximizare) */
 void browser_click(int cx, int cy, int mx, int my);
 int  browser_key(char ch);                /* 1 = tasta consumata */
 void browser_scroll(int lines);           /* +jos / -sus */

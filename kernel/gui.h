@@ -55,3 +55,9 @@ void gui_np_toggle(void);
 void gui_tm_toggle(void);
 /* Alt+F7: deschide/focuseaza/minimizeaza Browserul */
 void gui_br_toggle(void);
+/* Alt+F8: deschide/focuseaza/minimizeaza Setarile */
+void gui_set_toggle(void);
+/* Tasta Windows/Super: deschide/inchide meniul Start */
+void gui_menu_toggle(void);
+/* F11: maximizeaza/restaureaza fereastra focusata */
+void gui_maximize_focused(void);

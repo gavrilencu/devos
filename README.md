@@ -1,7 +1,10 @@
-# MyOS
+# DevOS (Developer OS)
 
-Sistem de operare x86-64 scris de la zero: bootloader propriu (fără GRUB),
-kernel în C. Build în WSL, rulare cu QEMU pe Windows.
+Sistem de operare x86-64 scris de la zero de **Gavrilencu Grigore**: bootloader
+propriu (fără GRUB), kernel în C. Build în WSL, rulare cu QEMU pe Windows.
+Rulează grafic la **Full HD 1920x1080**, cu meniu Start, aplicații în ferestre
+(Terminal, Explorer, Editor, Task Manager, Browser), Setări și oprire/repornire.
+(Denumit anterior „MyOS" — de aici referințele istorice din roadmap.)
 
 ## Build și rulare
 
@@ -414,6 +417,23 @@ reboot — până la următorul `wsl make`, care regenerează imaginea.
         scalate ca sa incapa in latimea paginii
       - verificat vizual: un PNG (benzi colorate) decodat de MyOS si afisat in
         pagina de start dintr-un `data:` URI
+- [x] Milestone 40: **Formulare HTML** in browser (v0.40):
+      - `<input>` (text/password), `<textarea>`, checkbox, `<button>`/submit;
+        focus cu click sau Tab, editare cu cursor
+      - trimitere GET (`action?query`) si POST (Content-Length + corp), cookies
+        de sesiune (Set-Cookie -> jar per gazda -> antet Cookie) pentru login
+- [x] Milestone 41: **Full HD + desktop DevOS** (v0.41):
+      - driver video propriu prin interfata Bochs VBE **dispi** (0x1CE/0x1CF):
+        boot la **1920x1080**, schimbare de rezolutie la cald din Setari
+        (`fb_set_mode`); wallpaper procedural independent de rezolutie
+      - **redenumire MyOS -> DevOS** (dezvoltat de Gavrilencu Grigore)
+      - **meniu Start = launcher**: Terminal, Explorer, Editor, Task Manager,
+        Browser, Setari + **Repornire** + **Oprire** (tasta Windows/Super)
+      - **Setari** (Alt+F8): sectiunile *Display* (rezolutie) si *Despre*
+      - **ferestre redimensionabile**: verde/F11 = maximizeaza, galben =
+        minimizeaza, rosu = inchide + termina procesele; browser si aplicatii
+        se re-incadreaza la dimensiunea ferestrei
+      - Task Manager live; taskbar mereu jos la orice rezolutie; QEMU full-screen
 - [ ] Tabele, mai mult CSS (flex/grid), decodor JPEG
 - [ ] SSH: schimb de chei Diffie-Hellman + cifru, peste TCP
 

@@ -13,6 +13,13 @@ void fb_flush(void);
 int fb_width(void);
 int fb_height(void);
 
+/* Schimba rezolutia la cald (prin dispi). Accepta doar dimensiuni <= cele
+ * de la boot (LFB si back buffer sunt dimensionate pentru maxim).
+ * Intoarce 1 la succes. */
+int fb_set_mode(int w, int h);
+int fb_max_width(void);
+int fb_max_height(void);
+
 void fb_putpixel(int x, int y, uint32_t rgb);
 void fb_fill(int x, int y, int w, int h, uint32_t rgb);
 void fb_fill_round(int x, int y, int w, int h, int r, uint32_t rgb);
@@ -32,6 +39,8 @@ void fb_clear_clip(void);
 /* Copiaza un rand de pixeli (ex. dintr-un wallpaper tinut in RAM),
  * respectand clipul. */
 void fb_copy_row(int x, int y, const uint32_t *src, int n);
+/* deseneaza o imagine RGBA (0xAARRGGBB) cu alpha blending (iconuri AA) */
+void fb_blit_rgba(int x, int y, const uint32_t *px, int w, int h);
 void fb_char(int x, int y, char ch, uint32_t fg, uint32_t bg);   /* 8x16 */
 void fb_text(int x, int y, const char *s, uint32_t fg, uint32_t bg);
 void fb_text_scaled(int x, int y, const char *s, uint32_t fg, int scale);

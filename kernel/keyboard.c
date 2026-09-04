@@ -43,6 +43,10 @@ static void kb_irq(struct int_frame *f)
         e0 = false;
         if (sc & 0x80)
             return;                     /* eliberare de tasta extinsa */
+        if (sc == 0x5B || sc == 0x5C) { /* tasta Windows/Super (stanga/dreapta) */
+            gui_menu_toggle();
+            return;
+        }
         /* sagetile si Delete/Home/End devin coduri speciale >= 0x80;
          * cu Shift apasat, variantele de selectie 0x90..0x95 */
         char spec = 0;
@@ -99,6 +103,14 @@ static void kb_irq(struct int_frame *f)
     }
     if (alt && !release && code == 0x3E + CON_COUNT) {   /* Alt+F7 */
         gui_br_toggle();
+        return;
+    }
+    if (alt && !release && code == 0x3F + CON_COUNT) {   /* Alt+F8 */
+        gui_set_toggle();
+        return;
+    }
+    if (!release && code == 0x57) {      /* F11 = maximizeaza/restaureaza fereastra */
+        gui_maximize_focused();
         return;
     }
 

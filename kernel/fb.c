@@ -1,6 +1,7 @@
 #include "fb.h"
 #include "vmm.h"
 #include "pmm.h"
+#include "io.h"
 
 /* Completat de stage2 (vezi boot/stage2.asm, VBE_SAVE). */
 #define VBE_SAVE 0x5F00
@@ -17,12 +18,15 @@ static volatile uint32_t *fbp;   /* framebuffer-ul real (vizibil pe ecran) */
 static uint32_t *back;           /* back buffer: desenam aici, apoi copiem */
 static uint32_t *draw;           /* tinta desenelor (= back daca exista) */
 static int W, H, pitch32;
+static int maxW, maxH;           /* rezolutia de boot = maximul suportat (LFB + back buffer) */
 static int dstride;              /* stride-ul lui `draw` (W sau pitch32) */
 static int active;
 static int cx0, cy0, cx1, cy1;   /* clipping (cx1/cy1 = exclusiv) */
 
 /* dreptunghiul "murdar" (modificat de la ultima prezentare pe ecran) */
 static int dx0, dy0, dx1, dy1, dirty;
+
+static uint32_t blend(uint32_t fg, uint32_t bg, int a);   /* definit mai jos */
 
 static void mark(int x, int y, int w, int h)
 {
@@ -69,6 +73,8 @@ int fb_init(void)
 
     W = v->w;
     H = v->h;
+    maxW = W;
+    maxH = H;
     pitch32 = v->pitch / 4;
 
     /* Framebuffer-ul e in spatiul PCI (~4 GiB), in afara identity map-ului
@@ -97,6 +103,57 @@ int fb_init(void)
     active = 1;
     return 1;
 }
+
+/* Interfata Bochs VBE dispi (QEMU/Bochs stdvga) — schimbare de rezolutie
+ * la cald. Adresa LFB si back buffer-ul raman cele de la boot (dimensionate
+ * pentru rezolutia maxima), deci acceptam doar rezolutii <= max. */
+#define DISPI_IDX 0x01CE
+#define DISPI_DAT 0x01CF
+
+static void dispi_write(uint16_t idx, uint16_t val)
+{
+    outw(DISPI_IDX, idx);
+    outw(DISPI_DAT, val);
+}
+
+static uint16_t dispi_read(uint16_t idx)
+{
+    outw(DISPI_IDX, idx);
+    return inw(DISPI_DAT);
+}
+
+int fb_set_mode(int w, int h)
+{
+    if (!active || w <= 0 || h <= 0 || w > maxW || h > maxH)
+        return 0;
+    if (w == W && h == H)
+        return 1;
+
+    uint16_t id = dispi_read(0);            /* index 0 = ID */
+    if (id < 0xB0C0 || id > 0xB0C5)
+        return 0;                            /* fara interfata dispi */
+
+    dispi_write(4, 0);                       /* ENABLE = 0 (dezactiveaza) */
+    dispi_write(1, (uint16_t)w);             /* XRES */
+    dispi_write(2, (uint16_t)h);             /* YRES */
+    dispi_write(3, 32);                      /* BPP */
+    dispi_write(6, (uint16_t)w);             /* VIRT_WIDTH => pitch = w*4 */
+    dispi_write(4, 0x41);                     /* ENABLE | LFB */
+    if (dispi_read(1) != (uint16_t)w)
+        return 0;                            /* n-a acceptat */
+
+    W = w;
+    H = h;
+    pitch32 = w;                             /* 32bpp, pitch = latime */
+    dstride = back ? W : pitch32;
+    cx0 = 0; cy0 = 0; cx1 = W; cy1 = H;
+    dx0 = 0; dy0 = 0; dx1 = W; dy1 = H;      /* forteaza un flush complet */
+    dirty = 1;
+    return 1;
+}
+
+int fb_max_width(void)  { return maxW; }
+int fb_max_height(void) { return maxH; }
 
 void fb_set_clip(int x, int y, int w, int h)
 {
@@ -138,6 +195,34 @@ void fb_fill(int x, int y, int w, int h, uint32_t rgb)
         uint32_t *row = draw + (uint64_t)(y + j) * dstride + x;
         for (int i = 0; i < w; i++)
             row[i] = rgb;
+    }
+    mark(x, y, w, h);
+}
+
+/* deseneaza o imagine RGBA (0xAARRGGBB per pixel) cu alpha blending peste
+ * ce e deja in back buffer. Folosit pentru iconuri anti-aliasing. */
+void fb_blit_rgba(int x, int y, const uint32_t *px, int w, int h)
+{
+    for (int j = 0; j < h; j++) {
+        int yy = y + j;
+        if (yy < cy0 || yy >= cy1)
+            continue;
+        for (int i = 0; i < w; i++) {
+            int xx = x + i;
+            if (xx < cx0 || xx >= cx1)
+                continue;
+            uint32_t s = px[j * w + i];
+            uint32_t a = s >> 24;
+            if (a == 0)
+                continue;
+            uint32_t fg = s & 0xFFFFFF;
+            if (a >= 255) {
+                draw[(uint64_t)yy * dstride + xx] = fg;
+            } else {
+                uint32_t bg = draw[(uint64_t)yy * dstride + xx];
+                draw[(uint64_t)yy * dstride + xx] = blend(fg, bg, (int)a);
+            }
+        }
     }
     mark(x, y, w, h);
 }

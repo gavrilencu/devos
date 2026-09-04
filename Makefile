@@ -81,6 +81,11 @@ FS_FILES := $(foreach p,$(UPROGS),$(p)=$(BUILD)/$(p).elf) \
             guess=$(BUILD)/guess.bin demo.bas=fs/demo.bas \
             readme.txt=fs/readme.txt \
             splash.raw=fs/splash.raw desk.raw=fs/desk.raw \
+            ic_terminal.raw=fs/ic_terminal.raw ic_explorer.raw=fs/ic_explorer.raw \
+            ic_editor.raw=fs/ic_editor.raw ic_taskmgr.raw=fs/ic_taskmgr.raw \
+            ic_browser.raw=fs/ic_browser.raw ic_settings.raw=fs/ic_settings.raw \
+            ic_reboot.raw=fs/ic_reboot.raw ic_power.raw=fs/ic_power.raw \
+            ic_start.raw=fs/ic_start.raw \
             docs/bun-venit.txt=fs/docs-bun-venit.txt \
             docs/idei.txt=fs/docs-idei.txt \
             sys/info.txt=fs/sys-info.txt
@@ -88,6 +93,9 @@ FS_FILES := $(foreach p,$(UPROGS),$(p)=$(BUILD)/$(p).elf) \
 $(BUILD)/fs.img: $(BUILD)/mkfs $(UELFS) $(BUILD)/hello.bin \
                  $(BUILD)/crash.bin $(BUILD)/guess.bin fs/demo.bas \
                  fs/readme.txt fs/splash.raw fs/desk.raw \
+                 fs/ic_terminal.raw fs/ic_explorer.raw fs/ic_editor.raw \
+                 fs/ic_taskmgr.raw fs/ic_browser.raw fs/ic_settings.raw \
+                 fs/ic_reboot.raw fs/ic_power.raw fs/ic_start.raw \
                  fs/docs-bun-venit.txt fs/docs-idei.txt fs/sys-info.txt
 	$(BUILD)/mkfs $@ $(FS_FILES)
 
