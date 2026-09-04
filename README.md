@@ -405,7 +405,16 @@ reboot — până la următorul `wsl make`, care regenerează imaginea.
       - a necesitat SSE (numerele JS sunt `double`): `js.o` compilat cu SSE,
         activat la boot (doar firul browserului îl folosește); stiva firelor
         de kernel mărită la 128 KiB (parserul/evaluatorul recursează)
-- [ ] Imagini (decodor PNG/JPEG), tabele, mai mult CSS (flex/grid)
+- [x] Milestone 39: **IMAGINI (PNG)** in browser (v0.39):
+      - `kernel/inflate.c` (decompresor DEFLATE, RFC 1951) + `kernel/png.c`
+        (decodor PNG: tipuri gri/RGB/paleta/RGBA pe 8 biti, defiltrare); testate
+        pe host cu vectori reali
+      - browserul afiseaza `<img>`: din `data:` URI (base64) SI descarcate de la
+        URL (http/https, prin `fetch_url_binary` peste acelasi client TCP/TLS),
+        scalate ca sa incapa in latimea paginii
+      - verificat vizual: un PNG (benzi colorate) decodat de MyOS si afisat in
+        pagina de start dintr-un `data:` URI
+- [ ] Tabele, mai mult CSS (flex/grid), decodor JPEG
 - [ ] SSH: schimb de chei Diffie-Hellman + cifru, peste TCP
 
 **Limită onestă:** motorul JS rulează JavaScript simplu/vanilla, dar **nu** e V8:

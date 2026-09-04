@@ -8,6 +8,7 @@
 #include "netstack.h"
 #include "tls.h"
 #include "js.h"
+#include "png.h"
 #include "pmm.h"
 #include "string.h"
 #include "task.h"
@@ -46,27 +47,61 @@ static char status[110];
 static char req_url[300];
 static volatile int req_flag;
 
+/* trimitere POST (formular): setate inainte de navigare, citite de firul de retea */
+static volatile int req_post;      /* 1 = urmatoarea cerere e POST */
+static char req_post_body[4096];
+static int  req_post_len;
+
+/* borcan de cookie simplu: cookie-urile unei singure gazde (sesiune/login) */
+static char cookie_host[80];
+static char cookie_jar[1024];
+
 /* buffere mari alocate din PMM (identity-mapped), nu din kheap */
-#define HTML_CAP (160 * 1024)
+#define HTML_CAP (512 * 1024)
 static char *html;
 static int   html_len;
 
-/* un "run" = o bucata de text asezata, cu stilul ei calculat */
+/* un "run" = o bucata de text / imagine / control de formular */
 struct run {
     int y;                 /* y absolut in continut (varful) */
     short x, w, h;         /* pozitie + dimensiuni in pixeli */
     short link;            /* index in tabela de linkuri, sau -1 */
+    short field;           /* index in tabela de campuri formular, sau -1 */
     unsigned char scale;   /* marimea fontului: 1,2,3 (x 8x16) */
     unsigned char bold;
     unsigned char align;   /* 0 stanga, 1 centru, 2 dreapta */
     unsigned char pad;
     unsigned int color;
     unsigned int bg;       /* fundal (0 = transparent) */
+    uint32_t *img;         /* daca != 0: run imagine (pixeli 0xRRGGBB) */
+    short iw, ih;          /* dimensiunile naturale ale imaginii */
     char text[32];
 };
 #define RUN_CAP 6000
 static struct run *runs;
 static int run_n;
+
+/* --- formulare --- */
+enum { F_TEXT, F_PASSWORD, F_SUBMIT, F_BUTTON, F_HIDDEN, F_TEXTAREA, F_CHECKBOX };
+#define FIELD_CAP 64
+#define FVAL_CAP 512
+struct field {
+    unsigned char type;
+    int form;              /* index in forms[], sau -1 */
+    char name[64];
+    char label[40];        /* pt. butoane: textul */
+    int checked;
+};
+static struct field fields[FIELD_CAP];
+static int field_n;
+static char fval[FIELD_CAP][FVAL_CAP];   /* valorile, persistente intre relayout-uri */
+static int focused_field;                /* -1 = niciunul */
+
+#define FORM_CAP 16
+struct wform { char action[256]; int method; };  /* method: 0 GET, 1 POST */
+static struct wform forms[FORM_CAP];
+static int form_n;
+static int cur_form;                     /* in timpul layout-ului */
 
 #define LINK_CAP 600
 #define HREF_MAX 192
@@ -75,6 +110,18 @@ static int link_n;
 
 static int scroll;
 static int content_h;
+
+/* imagini: buffere alocate din PMM */
+#define IMG_ARENA   (6 * 1024 * 1024)   /* pixeli decodati (bump, per pagina) */
+#define IMG_SRC_CAP (320 * 1024)        /* valoarea atributului src (data: URI) */
+#define IMG_BIN_CAP (512 * 1024)        /* fisierul PNG (base64-decodat / descarcat) */
+#define IMG_SCR_CAP (768 * 1024)        /* scratch pentru png_decode */
+static uint32_t *img_arena;
+static int img_used;                    /* in pixeli */
+static char *img_src;
+static uint8_t *img_bin;
+static uint8_t *img_scr;
+static int img_count;                   /* limita de imagini per pagina */
 
 /* istoric */
 #define HIST_N 24
@@ -471,8 +518,10 @@ static void emit_word(const char *w, int len)
         r->bold = st->bold;
         r->align = st->align;
         r->link = (short)ly_link;
+        r->field = -1;
         r->color = st->color;
         r->bg = st->bg;
+        r->img = 0;
         int c = 0;
         for (; c < len && c < 31; c++) r->text[c] = w[c];
         r->text[c] = '\0';
@@ -541,6 +590,167 @@ static int is_block_tag(const char *n)
 
 static char page_title[80];
 
+/* ---- imagini ---- */
+static int b64v(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+static int base64_decode(const char *s, uint8_t *out, int cap)
+{
+    int bits = 0, acc = 0, n = 0;
+    for (; *s; s++) {
+        if (*s == '=' || *s == '"' || *s == '>') break;
+        int v = b64v(*s);
+        if (v < 0) continue;
+        acc = (acc << 6) | v; bits += 6;
+        if (bits >= 8) { bits -= 8; if (n < cap) out[n++] = (uint8_t)(acc >> bits); }
+    }
+    return n;
+}
+
+/* descarca continutul binar al unui URL in `out` (max cap); -1 la eroare */
+static int fetch_url_binary(const char *url, uint8_t *out, int cap)
+{
+    task_sleep(60);      /* lasa conexiunea anterioara sa se inchida */
+    char host[160], path[320]; int port, tls;
+    url_split(url, host, sizeof(host), path, sizeof(path), &port, &tls);
+    if (!host[0]) return -1;
+    uint32_t ip = ip_parse_k(host);
+    if (!ip) {
+        dns_query(host);
+        for (;;) { uint32_t r = dns_result(); if (r == (uint32_t)-1) { task_sleep(30); continue; } ip = r; break; }
+    }
+    if (!ip) return -1;
+    int hc, g = 0;
+    if (tls) { hc = tls_connect(ip, (uint16_t)port, host); if (hc < 0) return -1; }
+    else {
+        hc = tcp_connect(ip, (uint16_t)port);
+        if (hc < 0) return -1;
+        int st; while ((st = tcp_status(hc)) == 1) { if (++g > 500) { tcp_cclose(hc); return -1; } task_sleep(20); }
+        if (st != 2) { tcp_cclose(hc); return -1; }
+    }
+    char req[600]; int q = 0;
+    const char *gg = "GET "; while (*gg) req[q++] = *gg++;
+    for (const char *s = path; *s; s++) req[q++] = *s;
+    const char *m = " HTTP/1.0\r\nHost: "; while (*m) req[q++] = *m++;
+    for (const char *s = host; *s; s++) req[q++] = *s;
+    const char *e = "\r\nUser-Agent: MyOS-Browser/1.0\r\nConnection: close\r\n\r\n";
+    while (*e) req[q++] = *e++;
+    if (tls) tls_send(hc, req, q); else tcp_csend(hc, req, q);
+
+    int tot = 0, idle = 0;
+    for (;;) {
+        int room = IMG_SCR_CAP - 1 - tot; if (room <= 0) break;
+        int ch = room > 1400 ? 1400 : room;
+        int r = tls ? tls_recv(hc, img_scr + tot, ch) : tcp_crecv(hc, img_scr + tot, ch);
+        if (r > 0) { tot += r; idle = 0; continue; }
+        if (tls) { if (r < 0) break; }
+        else if (tcp_status(hc) == 0) { int r2 = tcp_crecv(hc, img_scr + tot, room); if (r2 > 0) { tot += r2; continue; } break; }
+        if (++idle > 400) break;
+        task_sleep(25);
+    }
+    if (tls) tls_close(hc); else tcp_cclose(hc);
+    int body = 0;
+    for (int k = 0; k + 3 < tot; k++)
+        if (img_scr[k]=='\r'&&img_scr[k+1]=='\n'&&img_scr[k+2]=='\r'&&img_scr[k+3]=='\n') { body = k+4; break; }
+    int blen = tot - body; if (blen > cap) blen = cap; if (blen < 0) blen = 0;
+    memcpy(out, img_scr + body, blen);
+    return blen;
+}
+
+/* decodeaza o imagine (data: URI PNG sau URL http/https catre PNG) */
+static uint32_t *decode_image(const char *src, int *w, int *h)
+{
+    if (!img_arena || img_count >= 12) return 0;
+    int binlen;
+    if (ci_eq(src, "data:", 5)) {
+        const char *comma = 0;
+        for (const char *p = src; *p; p++) if (*p == ',') { comma = p + 1; break; }
+        if (!comma) return 0;
+        int isb64 = 0;
+        for (const char *p = src; p < comma; p++) if (ci_eq(p, "base64", 6)) { isb64 = 1; break; }
+        if (!isb64) return 0;
+        binlen = base64_decode(comma, img_bin, IMG_BIN_CAP);
+    } else {
+        binlen = fetch_url_binary(src, img_bin, IMG_BIN_CAP);
+    }
+    if (binlen <= 8) return 0;
+    uint32_t *px = img_arena + img_used;
+    int avail = (IMG_ARENA / 4) - img_used;
+    int iw, ih;
+    if (png_decode(img_bin, binlen, px, avail, &iw, &ih, img_scr, IMG_SCR_CAP) != 0)
+        return 0;
+    img_used += iw * ih;
+    img_count++;
+    *w = iw; *h = ih;
+    return px;
+}
+
+static void emit_image(uint32_t *px, int iw, int ih)
+{
+    struct style *st = cs();
+    if (ly_x > BR_MARGIN + st->indent) ly_newline();
+    int maxw = BR_RIGHT - (BR_MARGIN + st->indent);
+    int dw = iw, dh = ih;
+    if (dw > maxw && iw > 0) { dh = (int)((long)ih * maxw / iw); dw = maxw; }
+    if (dh > 640 && dh > 0) { dw = (int)((long)dw * 640 / dh); dh = 640; }
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+    if (run_n < RUN_CAP) {
+        struct run *r = &runs[run_n++];
+        r->x = (short)(BR_MARGIN + st->indent);
+        r->y = ly_y; r->w = (short)dw; r->h = (short)dh;
+        r->img = px; r->iw = (short)iw; r->ih = (short)ih;
+        r->link = (short)ly_link; r->field = -1; r->scale = 1; r->bold = 0;
+        r->align = st->align; r->color = 0; r->bg = 0; r->text[0] = 0;
+    }
+    ly_y += dh + 6;
+    ly_x = BR_MARGIN + st->indent;
+    ly_lineh = 20;
+}
+
+static int fields_init;    /* 1 = prima asezare a paginii (seteaza valorile initiale) */
+
+static void emit_field(int type, const char *name, const char *initval,
+                       const char *label, int checked)
+{
+    if (field_n >= FIELD_CAP) return;
+    int idx = field_n++;
+    struct field *f = &fields[idx];
+    f->type = (unsigned char)type; f->form = cur_form; f->checked = checked;
+    int i = 0; for (; name[i] && i < 63; i++) f->name[i] = name[i]; f->name[i] = 0;
+    i = 0; for (; label && label[i] && i < 39; i++) f->label[i] = label[i]; f->label[i] = 0;
+    if (fields_init) {   /* prima asezare: pune valoarea din atributul value= */
+        int k = 0; for (; initval && initval[k] && k < FVAL_CAP - 1; k++) fval[idx][k] = initval[k];
+        fval[idx][k] = 0;
+    }
+    if (type == F_HIDDEN) return;    /* invizibil, dar in tabela */
+
+    struct style *st = cs();
+    int wdt, hgt = 22;
+    if (type == F_SUBMIT || type == F_BUTTON) {
+        int L = (int)strlen(f->label[0] ? f->label : (type == F_SUBMIT ? "Trimite" : "Buton"));
+        wdt = L * 8 + 20;
+    } else if (type == F_TEXTAREA) { wdt = 320; hgt = 66; }
+    else if (type == F_CHECKBOX) { wdt = 18; hgt = 18; }
+    else wdt = 190;                  /* text / password */
+
+    if (ly_x > BR_MARGIN + st->indent && ly_x + wdt > BR_RIGHT) ly_newline();
+    if (hgt + 4 > ly_lineh) ly_lineh = hgt + 4;
+    if (run_n < RUN_CAP) {
+        struct run *r = &runs[run_n++];
+        r->x = (short)ly_x; r->y = ly_y; r->w = (short)wdt; r->h = (short)hgt;
+        r->field = (short)idx; r->link = -1; r->img = 0;
+        r->scale = 1; r->bold = 0; r->align = 0; r->color = 0; r->bg = 0; r->text[0] = 0;
+    }
+    ly_x += wdt + 6;
+}
+
 /* aliniere pe linii: deplaseaza rulele cu align != 0 (post-procesare) */
 static void align_pass(void)
 {
@@ -570,6 +780,7 @@ static void align_pass(void)
 static void layout_html(const char *h, int n)
 {
     run_n = 0; link_n = 0; css_n = 0; content_h = 0; page_title[0] = '\0';
+    field_n = 0; form_n = 0; cur_form = -1;
     ly_x = BR_MARGIN; ly_y = BR_MARGIN; ly_link = -1; ly_lineh = 20;
     list_depth = 0;
 
@@ -686,23 +897,83 @@ static void layout_html(const char *h, int n)
                         struct run *r = &runs[run_n++];
                         r->x = BR_MARGIN; r->y = ly_y; r->w = BR_RIGHT - BR_MARGIN;
                         r->h = 1; r->scale = 1; r->bold = 0; r->align = 0;
-                        r->link = -1; r->color = 0xCCCCCC; r->bg = 0xCCCCCC;
-                        r->text[0] = '\0';
+                        r->link = -1; r->field = -1; r->color = 0xCCCCCC; r->bg = 0xCCCCCC;
+                        r->img = 0; r->text[0] = '\0';
                     }
                     ly_y += 8; ly_x = BR_MARGIN + cs()->indent;
                 }
-                if (strcmp(name, "img") == 0) {
-                    char alt[64];
-                    read_attr(ts, "alt", alt, sizeof(alt));
-                    if (alt[0]) { emit_word("[", 1);
-                        /* alt-ul, cuvant cu cuvant, e prea mult; scurt: */
+                if (strcmp(name, "img") == 0 && img_src) {
+                    read_attr(ts, "src", img_src, IMG_SRC_CAP);
+                    int iw = 0, ih = 0;
+                    uint32_t *px = img_src[0] ? decode_image(img_src, &iw, &ih) : 0;
+                    if (px) emit_image(px, iw, ih);
+                    else {
+                        char alt[80]; read_attr(ts, "alt", alt, sizeof(alt));
+                        if (alt[0]) {
+                            emit_word("[img:", 5);
+                            emit_word(alt, (int)strlen(alt));
+                            emit_word("]", 1);
+                        }
                     }
+                }
+                if (strcmp(name, "form") == 0) {
+                    if (ly_x > BR_MARGIN) ly_newline();
+                    if (form_n < FORM_CAP) {
+                        cur_form = form_n++;
+                        read_attr(ts, "action", forms[cur_form].action, sizeof(forms[cur_form].action));
+                        char meth[8]; read_attr(ts, "method", meth, sizeof(meth));
+                        forms[cur_form].method = (meth[0]=='p'||meth[0]=='P') ? 1 : 0;
+                    }
+                }
+                if (strcmp(name, "input") == 0) {
+                    char itype[16], iname[64], ival[FVAL_CAP];
+                    read_attr(ts, "type", itype, sizeof(itype));
+                    read_attr(ts, "name", iname, sizeof(iname));
+                    read_attr(ts, "value", ival, sizeof(ival));
+                    int ft = F_TEXT;
+                    if (ci_eq(itype,"password",8)) ft = F_PASSWORD;
+                    else if (ci_eq(itype,"submit",6)) ft = F_SUBMIT;
+                    else if (ci_eq(itype,"button",6)) ft = F_BUTTON;
+                    else if (ci_eq(itype,"hidden",6)) ft = F_HIDDEN;
+                    else if (ci_eq(itype,"checkbox",8)) ft = F_CHECKBOX;
+                    else if (ci_eq(itype,"radio",5)) ft = F_CHECKBOX;
+                    int chk = 0;
+                    for (const char *q = ts; *q && *q != '>'; q++)
+                        if ((q[0]==' ') && ci_eq(q+1,"checked",7)) { chk = 1; break; }
+                    const char *lbl = ft==F_SUBMIT ? (ival[0]?ival:"Trimite") : (ft==F_BUTTON?(ival[0]?ival:"Buton"):0);
+                    emit_field(ft, iname, ival, lbl, chk);
+                }
+                if (strcmp(name, "textarea") == 0) {
+                    char iname[64]; read_attr(ts, "name", iname, sizeof(iname));
+                    /* valoarea = textul dintre <textarea> si </textarea> */
+                    int j = i; while (j < n && h[j] != '>') j++; j++;
+                    int s0 = j;
+                    while (j + 10 < n && !(h[j]=='<' && ci_eq(h+j+1,"/textarea",9))) j++;
+                    char ta[FVAL_CAP]; int tl = j - s0; if (tl > FVAL_CAP-1) tl = FVAL_CAP-1;
+                    memcpy(ta, h + s0, tl); ta[tl] = 0;
+                    emit_field(F_TEXTAREA, iname, ta, 0, 0);
+                    i = j; while (i < n && h[i] != '>') i++;
+                    /* lasam parserul sa consume </textarea> normal mai jos */
+                }
+                if (strcmp(name, "button") == 0) {
+                    /* textul butonului = pana la </button> */
+                    int j = i; while (j < n && h[j] != '>') j++; j++;
+                    int s0 = j;
+                    while (j + 8 < n && !(h[j]=='<' && ci_eq(h+j+1,"/button",7))) j++;
+                    char lbl[40]; int tl = j - s0; if (tl > 39) tl = 39;
+                    memcpy(lbl, h + s0, tl); lbl[tl] = 0;
+                    char bt[16]; read_attr(ts, "type", bt, sizeof(bt));
+                    int ft = ci_eq(bt,"button",6) ? F_BUTTON : F_SUBMIT;
+                    char iname[64]; read_attr(ts, "name", iname, sizeof(iname));
+                    emit_field(ft, iname, "", lbl[0]?lbl:"Trimite", 0);
+                    i = j; while (i < n && h[i] != '>') i++;
                 }
                 if (strcmp(name, "p") == 0 || (name[0]=='h'&&name[1]>='1'&&name[1]<='6'&&name[2]==0))
                     ly_y += 4;   /* spatiu inainte de paragraf/titlu */
             } else {
                 /* inchidere: scoatem de pe stiva pana la eticheta */
                 if (strcmp(name, "a") == 0) ly_link = -1;
+                if (strcmp(name, "form") == 0) cur_form = -1;
                 if (strcmp(name, "ul") == 0 || strcmp(name, "ol") == 0) {
                     if (list_depth > 0) list_depth--;
                 }
@@ -776,7 +1047,7 @@ static int dom_scr_used;
 #define JS_ARENA (8 * 1024 * 1024)
 static char *js_arena;
 
-#define SER_CAP (256 * 1024)
+#define SER_CAP (640 * 1024)
 static char *ser_all;
 
 struct scriptrec { const char *src; int len; };
@@ -985,15 +1256,33 @@ static void run_scripts(void)
 }
 
 /* construieste DOM, ruleaza scripturile, apoi aseaza pagina finala */
+static int ser_len;    /* lungimea HTML-ului serializat (pentru relayout) */
+
 static void render_page(const char *h, int n)
 {
-    if (!dnodes || !ser_all) { layout_html(h, n); return; }
+    img_used = 0; img_count = 0;
+    /* pagina noua: golim valorile campurilor si focusul */
+    for (int i = 0; i < FIELD_CAP; i++) fval[i][0] = 0;
+    focused_field = -1;
+    fields_init = 1;
+    if (!dnodes || !ser_all) { ser_len = 0; layout_html(h, n); return; }
     dom_build(h, n);
     run_scripts();
     ser_buf = ser_all; ser_pos = 0; ser_cap = SER_CAP;
     ser_node(0);
     ser_all[ser_pos] = 0;
+    ser_len = ser_pos;
     layout_html(ser_all, ser_pos);
+}
+
+/* reaseaza pagina din HTML-ul serializat cache-uit, PASTRAND valorile
+ * campurilor (nu re-ruleaza JavaScript). Folosit dupa editarea unui camp. */
+static void relayout(void)
+{
+    if (ser_len <= 0) return;
+    fields_init = 0;
+    layout_html(ser_all, ser_len);
+    dirty = 1;
 }
 
 /* ================= retea: descarcare HTTP ================= */
@@ -1037,7 +1326,36 @@ static int parse_status(const char *resp, int len)
 
 /* descarca un URL in `html`/`html_len`; intoarce codul HTTP sau -1 la eroare
  * de retea. Nu urmareste redirectari (o face apelantul). */
-static int http_get(const char *url)
+/* extrage cookie-urile (Set-Cookie) din raspuns si le pastreaza pt. gazda */
+static void store_cookies(const char *resp, int len, const char *host)
+{
+    int hend = len;
+    for (int i = 0; i + 3 < len; i++)
+        if (resp[i]=='\r'&&resp[i+1]=='\n'&&resp[i+2]=='\r'&&resp[i+3]=='\n') { hend = i; break; }
+    int found = 0;
+    for (int i = 0; i < hend; i++) {
+        if ((i == 0 || resp[i-1] == '\n') && ci_eq(resp + i, "set-cookie:", 11)) {
+            int j = i + 11; while (resp[j] == ' ') j++;
+            char pair[256]; int p = 0;
+            while (j < hend && resp[j]!=';' && resp[j]!='\r' && resp[j]!='\n' && p < 255)
+                pair[p++] = resp[j++];
+            pair[p] = 0;
+            if (p > 0) {
+                if (!found) {
+                    int k = 0; for (; host[k] && k < 79; k++) cookie_host[k] = host[k];
+                    cookie_host[k] = 0; cookie_jar[0] = 0; found = 1;
+                }
+                int jl = (int)strlen(cookie_jar);
+                if (jl > 0 && jl < 1000) { cookie_jar[jl++] = ';'; cookie_jar[jl++] = ' '; cookie_jar[jl] = 0; }
+                jl = (int)strlen(cookie_jar);
+                for (int kk = 0; pair[kk] && jl < 1022; kk++) cookie_jar[jl++] = pair[kk];
+                cookie_jar[jl] = 0;
+            }
+        }
+    }
+}
+
+static int http_get(const char *url, int post, const char *body, int blen)
 {
     char host[160], path[320];
     int port, tls;
@@ -1078,15 +1396,31 @@ static int http_get(const char *url)
     }
 
     /* cerere */
-    char req[600];
+    char req[900];
     int p = 0;
-    const char *g = "GET "; while (*g) req[p++] = *g++;
+    const char *g = post ? "POST " : "GET ";
+    while (*g) req[p++] = *g++;
     for (const char *s = path; *s; s++) req[p++] = *s;
     const char *m = " HTTP/1.0\r\nHost: "; while (*m) req[p++] = *m++;
     for (const char *s = host; *s; s++) req[p++] = *s;
-    const char *e = "\r\nUser-Agent: MyOS-Browser/1.0\r\n"
-                    "Accept: text/html\r\nConnection: close\r\n\r\n";
+    const char *ua = "\r\nUser-Agent: MyOS-Browser/1.0\r\nAccept: text/html\r\n";
+    while (*ua) req[p++] = *ua++;
+    /* cookie pentru gazda (sesiune) */
+    if (cookie_jar[0] && ci_eq(cookie_host, host, (int)strlen(cookie_host)+1)) {
+        const char *ck = "Cookie: "; while (*ck) req[p++] = *ck++;
+        for (const char *s = cookie_jar; *s && p < 800; s++) req[p++] = *s;
+        req[p++] = '\r'; req[p++] = '\n';
+    }
+    if (post) {
+        const char *ct = "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ";
+        while (*ct) req[p++] = *ct++;
+        char nb[12]; int ni = 0, bl = blen; if (bl==0) nb[ni++]='0'; else { char t[12]; int ti=0; while(bl){t[ti++]=(char)('0'+bl%10);bl/=10;} while(ti)nb[ni++]=t[--ti]; } nb[ni]=0;
+        for (int k = 0; k < ni; k++) req[p++] = nb[k];
+        req[p++]='\r'; req[p++]='\n';
+    }
+    const char *e = "Connection: close\r\n\r\n";
     while (*e) req[p++] = *e++;
+    if (post && body) for (int k = 0; k < blen && p < (int)sizeof(req); k++) req[p++] = body[k];
     if (tls) tls_send(hc, req, p);
     else     tcp_csend(hc, req, p);
 
@@ -1118,6 +1452,7 @@ static int http_get(const char *url)
     if (tls) tls_close(hc);
     else     tcp_cclose(hc);
     html[html_len] = '\0';
+    store_cookies(html, html_len, host);
     return parse_status(html, html_len);
 }
 
@@ -1139,9 +1474,13 @@ static void do_fetch(const char *url0)
     scroll = 0;
     dirty = 1;
 
+    int use_post = req_post;         /* doar prima cerere e POST */
+    req_post = 0;
+
     int hops = 0;
     for (;;) {
-        int code = http_get(url);
+        int code = http_get(url, use_post, req_post_body, req_post_len);
+        use_post = 0;                /* dupa redirect: GET */
         if (code < 0) { state = ST_ERR; dirty = 1; return; }
 
         if ((code == 301 || code == 302 || code == 303 ||
@@ -1257,6 +1596,8 @@ static const char *HOME =
     "document.getElementById('jsdemo').innerHTML = "
     "'JavaScript ruleaza in MyOS! 6*7=' + (6*7) + ', sqrt(169)=' + Math.sqrt(169);"
     "</script>"
+    "<p>Imagine PNG (decodata de MyOS dintr-un data: URI):</p>"
+    "<img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFAAAAAwCAYAAACG5f33AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAACRSURBVGhD7dChAQIxEADBK+d1yqHOL4Ii0Gg6CB5H1o4Ys3Lnvdbm3PwG/mNgZGBkYGRgZGBkYGRgZGBkYGRgNOtem3MGRgZGBkYGRgZGBkYGRgZGBkYGRgZGsx6vzTkDIwMjAyMDIwMjAyMDIwMjAyMDIwOj+TyvzTkDIwMjAyMDIwMjAyMDIwMjAyMDIwOjL29uMJ0mi6joAAAAAElFTkSuQmCC\">"
     "<p>Exemple (click pe link):</p>"
     "<p><a href=\"https://example.com/\">https://example.com</a> - test HTTPS/TLS</p>"
     "<p><a href=\"http://info.cern.ch/\">http://info.cern.ch</a> - primul site web din lume</p>"
@@ -1274,6 +1615,10 @@ void browser_init(void)
     uint64_t sp2 = pmm_alloc_contig((DOM_SCR_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
     uint64_t jp = pmm_alloc_contig((JS_ARENA + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
     uint64_t serp = pmm_alloc_contig((SER_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t iap = pmm_alloc_contig((IMG_ARENA + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t isp = pmm_alloc_contig((IMG_SRC_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t ibp = pmm_alloc_contig((IMG_BIN_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+    uint64_t iscp = pmm_alloc_contig((IMG_SCR_CAP + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
     html = (char *)hp;
     runs = (struct run *)rp;
     links = (char (*)[HREF_MAX])lp;
@@ -1282,6 +1627,10 @@ void browser_init(void)
     dom_scratch = (char *)sp2;
     js_arena = (char *)jp;
     ser_all = (char *)serp;
+    img_arena = (uint32_t *)iap;
+    img_src = (char *)isp;
+    img_bin = (uint8_t *)ibp;
+    img_scr = (uint8_t *)iscp;
 
     strcpy(addr, "");
     addr_len = 0;
@@ -1391,6 +1740,54 @@ void browser_draw(int cx, int cy)
             int sy = py + r->y - scroll;
             if (sy + r->h <= top || sy >= bot) continue;
             int sx = cx + r->x;
+            if (r->img) {                        /* imagine: blit cu scalare */
+                for (int dy = 0; dy < r->h; dy++) {
+                    int yy = sy + dy;
+                    if (yy < top || yy >= bot) continue;
+                    int srcy = r->ih > 0 ? dy * r->ih / r->h : 0;
+                    const uint32_t *srow = r->img + (long)srcy * r->iw;
+                    for (int dx = 0; dx < r->w; dx++) {
+                        int srcx = r->iw > 0 ? dx * r->iw / r->w : 0;
+                        fb_putpixel(sx + dx, yy, srow[srcx]);
+                    }
+                }
+                if (r->link >= 0) fb_fill(sx, sy + r->h - 1, r->w, 1, LINK_FG);
+                continue;
+            }
+            if (r->field >= 0) {                 /* control de formular */
+                struct field *f = &fields[r->field];
+                if (f->type == F_SUBMIT || f->type == F_BUTTON) {
+                    uint32_t bbg = ACCENT;
+                    fb_fill_round2(sx, sy, r->w, r->h, 6, bbg, 1, PAGE_BG);
+                    const char *lb = f->label[0] ? f->label : "Trimite";
+                    fb_text(sx + (r->w - (int)strlen(lb)*8)/2, sy + 3, lb, 0xFFFFFF, bbg);
+                } else if (f->type == F_CHECKBOX) {
+                    fb_fill_round2(sx, sy, r->w, r->h, 3, 0xFFFFFF, 1, PAGE_BG);
+                    fb_fill(sx, sy, r->w, 1, 0x808890); fb_fill(sx, sy, 1, r->h, 0x808890);
+                    fb_fill(sx, sy+r->h-1, r->w, 1, 0x808890); fb_fill(sx+r->w-1, sy, 1, r->h, 0x808890);
+                    if (f->checked) fb_text(sx + 4, sy + 1, "x", 0x1284E4, 0xFFFFFF);
+                } else {                         /* text / password / textarea */
+                    fb_fill(sx, sy, r->w, r->h, 0xFFFFFF);
+                    uint32_t brd = (focused_field == r->field) ? ACCENT : 0x9098A0;
+                    fb_fill(sx, sy, r->w, 1, brd); fb_fill(sx, sy+r->h-1, r->w, 1, brd);
+                    fb_fill(sx, sy, 1, r->h, brd); fb_fill(sx+r->w-1, sy, 1, r->h, brd);
+                    char *v = fval[r->field];
+                    int vl = (int)strlen(v);
+                    int maxch = (r->w - 8) / 8;
+                    int start = 0;
+                    if (f->type != F_TEXTAREA && vl > maxch) start = vl - maxch;
+                    char shown[80]; int sc2 = 0;
+                    for (int k = start; v[k] && sc2 < maxch && sc2 < 79; k++)
+                        shown[sc2++] = (f->type == F_PASSWORD) ? '*' : v[k];
+                    shown[sc2] = 0;
+                    fb_text(sx + 4, sy + 3, shown, 0x202124, 0xFFFFFF);
+                    if (focused_field == r->field) {
+                        int cxp = sx + 4 + sc2 * 8;
+                        fb_fill(cxp, sy + 2, 2, r->h - 4, ACCENT);
+                    }
+                }
+                continue;
+            }
             if (r->bg) fb_fill(sx, sy, r->w, r->h, r->bg);
             if (r->text[0] == '\0') continue;    /* ex. linia <hr> */
             uint32_t tbg = r->bg ? r->bg : PAGE_BG;
@@ -1436,6 +1833,61 @@ static int in_rect(int x, int y, int rx, int ry, int rw, int rh)
     return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
 }
 
+static int urlencode(const char *s, char *out, int cap)
+{
+    int o = 0;
+    static const char *hex = "0123456789ABCDEF";
+    for (; *s && o < cap - 4; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_'||c=='.'||c=='~')
+            out[o++] = (char)c;
+        else if (c == ' ') out[o++] = '+';
+        else { out[o++] = '%'; out[o++] = hex[c >> 4]; out[o++] = hex[c & 15]; }
+    }
+    return o;
+}
+
+/* trimite un formular: construieste query-ul din campuri, apoi GET sau POST */
+static void do_submit(int formidx)
+{
+    if (formidx < 0 || formidx >= form_n) return;
+    struct wform *fm = &forms[formidx];
+    static char query[4096];
+    int q = 0;
+    for (int i = 0; i < field_n; i++) {
+        struct field *f = &fields[i];
+        if (f->form != formidx) continue;
+        if (f->type == F_SUBMIT || f->type == F_BUTTON) continue;
+        if (f->type == F_CHECKBOX && !f->checked) continue;
+        if (!f->name[0]) continue;
+        if (q) query[q++] = '&';
+        q += urlencode(f->name, query + q, (int)sizeof(query) - q);
+        query[q++] = '=';
+        const char *val = (f->type == F_CHECKBOX) ? (fval[i][0] ? fval[i] : "on") : fval[i];
+        q += urlencode(val, query + q, (int)sizeof(query) - q);
+    }
+    query[q] = 0;
+
+    char action[300];
+    if (fm->action[0]) resolve_url(cur_url, fm->action, action, sizeof(action));
+    else { strncpy(action, cur_url, sizeof(action) - 1); action[sizeof(action) - 1] = 0; }
+
+    if (fm->method == 1) {               /* POST */
+        int n = q; if (n > (int)sizeof(req_post_body) - 1) n = sizeof(req_post_body) - 1;
+        memcpy(req_post_body, query, n); req_post_body[n] = 0; req_post_len = n;
+        req_post = 1;
+        browser_navigate(action);
+    } else {                             /* GET: action?query */
+        static char full[4096];
+        int fl = 0;
+        for (const char *p = action; *p && fl < 4000; p++) if (*p != '?') full[fl++] = *p; else break;
+        full[fl++] = '?';
+        for (int k = 0; k < q && fl < 4095; k++) full[fl++] = query[k];
+        full[fl] = 0;
+        browser_navigate(full);
+    }
+}
+
 void browser_click(int cx, int cy, int mx, int my)
 {
     int rx = mx - cx, ry = my - cy;
@@ -1465,11 +1917,31 @@ void browser_click(int cx, int cy, int mx, int my)
     }
     if (ry >= BR_H - BR_STAT) return;
 
-    /* click in pagina: link? */
+    /* click in pagina: camp de formular sau link? */
     addr_focus = 0;
     if (state == ST_DONE) {
         int py = BR_TOOL;
         int content_y = ry - py + scroll;
+        for (int i = 0; i < run_n; i++) {
+            struct run *r = &runs[i];
+            if (r->field < 0) continue;
+            if (rx >= r->x && rx < r->x + r->w &&
+                content_y >= r->y && content_y < r->y + r->h) {
+                struct field *f = &fields[r->field];
+                if (f->type == F_SUBMIT || f->type == F_BUTTON) {
+                    focused_field = -1;
+                    if (f->type == F_SUBMIT) do_submit(f->form);
+                } else if (f->type == F_CHECKBOX) {
+                    f->checked = !f->checked;
+                    focused_field = -1;
+                    relayout();
+                } else {
+                    focused_field = r->field;
+                    relayout();
+                }
+                return;
+            }
+        }
         for (int i = 0; i < run_n; i++) {
             struct run *r = &runs[i];
             if (r->link < 0) continue;
@@ -1482,6 +1954,7 @@ void browser_click(int cx, int cy, int mx, int my)
             }
         }
     }
+    focused_field = -1;
     dirty = 1;
 }
 
@@ -1529,6 +2002,37 @@ int browser_key(char ch)
             addr[addr_len] = '\0';
         }
         dirty = 1;
+        return 1;
+    }
+    /* Tab: focuseaza urmatorul camp editabil (are prioritate fata de editare) */
+    if (c == '\t' && field_n > 0) {
+        int start = focused_field;
+        for (int k = 1; k <= field_n; k++) {
+            int idx = (start + k) % field_n;
+            int t = fields[idx].type;
+            if (t == F_TEXT || t == F_PASSWORD || t == F_TEXTAREA) {
+                focused_field = idx; relayout(); return 1;
+            }
+        }
+        return 1;
+    }
+    /* camp de formular focusat: editam valoarea lui */
+    if (focused_field >= 0 && focused_field < field_n) {
+        char *v = fval[focused_field];
+        int vl = (int)strlen(v);
+        int ta = (fields[focused_field].type == F_TEXTAREA);
+        if (c == '\b') { if (vl > 0) v[vl - 1] = 0; relayout(); return 1; }
+        if (c == '\n') {
+            if (ta) { if (vl < FVAL_CAP - 1) { v[vl] = '\n'; v[vl+1] = 0; } relayout(); }
+            else { int fm = fields[focused_field].form; focused_field = -1; do_submit(fm); }
+            return 1;
+        }
+        if (c == 27) { focused_field = -1; relayout(); return 1; }
+        if (c == 0x81) { browser_scroll(1); return 1; }
+        if (c == 0x80) { browser_scroll(-1); return 1; }
+        if (c >= 32 && c < 127 && vl < FVAL_CAP - 1) {
+            v[vl] = (char)c; v[vl + 1] = 0; relayout();
+        }
         return 1;
     }
     /* fara focus pe bara: derulare / navigare */

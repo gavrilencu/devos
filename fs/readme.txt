@@ -12,7 +12,8 @@ de sus si apasa Enter, sau click pe un link. Merge HTTP si HTTPS (TLS 1.2 scris
 de la zero: x25519 + AES-GCM + SHA-256). Randare cu CSS: marimi de font, culori,
 fundaluri, aliniere, liste, bold, linkuri. Are si un MOTOR JAVASCRIPT propriu:
 ruleaza JS din pagini (variabile, functii, bucle, obiecte, array-uri, DOM -
-document.write, getElementById, innerHTML, createElement). Inapoi/inainte/reload,
+document.write, getElementById, innerHTML, createElement). Afiseaza si IMAGINI
+PNG (din data: URI sau descarcate de la URL). Inapoi/inainte/reload,
 istoric, word-wrap, derulare. Bara de adresa: click ca sa pui cursorul unde vrei.
 Incearca https://example.com sau info.cern.ch.
 Nota onesta: motorul JS ruleaza JavaScript simplu/vanilla, NU framework-uri mari

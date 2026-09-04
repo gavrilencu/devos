@@ -251,7 +251,7 @@ static void srv_input(uint32_t src, const struct tcphdr *t,
  *  CLIENT outbound (active open) — pentru telnet/HTTP din MyOS
  * ===================================================================== */
 
-#define NCLI 2
+#define NCLI 4
 #define CLI_RX 16384
 static struct tcp_conn cli[NCLI];
 static uint16_t next_lport = 40000;

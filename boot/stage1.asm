@@ -13,7 +13,7 @@
 [org 0x7C00]
 [bits 16]
 
-CHUNKS        equ 48            ; 48 bucati x 8 sectoare = 384 sectoare (192 KiB)
+CHUNKS        equ 80            ; 80 bucati x 8 sectoare = 640 sectoare (320 KiB)
 SECT_PER_READ equ 8
 
 start:
