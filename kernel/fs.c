@@ -7,7 +7,7 @@
 #define FS_BASE_LBA    2048u   /* zona FS incepe la 1 MiB in imaginea de disc */
 #define TABLE_SECTORS  4u      /* regiune fixa pentru tabel (max 63 fisiere) */
 #define FS_MAX_FILES   63
-#define FS_MAX_SECTORS 22528u  /* zona FS are 11 MiB (imaginea totala: 12 MiB) */
+#define FS_MAX_SECTORS 45056u  /* zona FS are 22 MiB (imaginea totala: 24 MiB) */
 
 static struct fs_file *files;  /* tabel in RAM, capacitate FS_MAX_FILES */
 static int nfiles;

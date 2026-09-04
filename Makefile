@@ -117,14 +117,15 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf
 		echo "EROARE: kernelul are $$sz bytes, peste limita de $(KERNEL_MAX)"; exit 1; fi
 
 # Imaginea finala: boot (stage1+stage2+kernel) in primul 1 MiB,
-# sistemul de fisiere MyFS de la 1 MiB (LBA 2048) incolo — zona FS: 3 MiB.
-# NOTA: fisierele salvate din MyOS persista in build/myos.img pana la
+# sistemul de fisiere MyFS de la 1 MiB (LBA 2048) incolo. Imagine 24 MiB
+# ca sa incapa wallpaper-ele Full HD (2 x 8.3 MiB) + iconuri + programe.
+# NOTA: fisierele salvate din DevOS persista in build/myos.img pana la
 # urmatorul `make` care o regenereaza.
 $(BUILD)/myos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(BUILD)/fs.img
 	cat $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin > $@
 	truncate -s 1M $@
 	cat $(BUILD)/fs.img >> $@
-	truncate -s 12M $@
+	truncate -s 24M $@
 
 clean:
 	rm -rf $(BUILD)
