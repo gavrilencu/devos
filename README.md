@@ -443,9 +443,88 @@ reboot — până la următorul `wsl make`, care regenerează imaginea.
         aplicatia activa; **meniu Start** centrat cu grid de iconuri + Repornire/Oprire
       - fix: imaginea de disc marita la **24 MiB** (`FS_MAX_SECTORS` marit) ca sa
         incapa wallpaper-ele Full HD (2 x 8.3 MiB) + iconurile fara truncheare
-      - limita ramasa: textul interfetei foloseste inca fontul bitmap 8x16 al
-        BIOS-ului (un motor de font anti-aliasing e un pas separat)
-- [ ] Font UI anti-aliasing (proportional), tabele, mai mult CSS, decodor JPEG
+- [x] Milestone 43: **Font UI anti-aliasing** (v0.43):
+      - atlas de glife **proportional** generat pe host din Segoe UI cu
+        anti-aliasing (`scripts/genfont.ps1` → `fs/uifont.bin`: acoperire 0..255
+        per pixel + latimi de avans per caracter)
+      - kernel: `fb_ui_text` / `fb_ui_text_scaled` deseneaza textul amestecat
+        (alpha) peste fundal; tot chrome-ul (meniu, Setari, titluri, Task
+        Manager, Explorer, ceas) foloseste fontul AA — text fin, ca un OS modern
+      - terminalul si corpul editorului raman pe fontul **monospace** 8x16
+        (alinierea pe coloane conteaza acolo)
+- [x] Milestone 44: **Client SSH de la zero** (v0.44):
+      - transport SSH-2 complet in kernel (`kernel/ssh.c`): schimb de versiuni,
+        binary packet protocol, KEX **curve25519-sha256** (x25519 + SHA-256),
+        cifru **aes128-ctr**, MAC **hmac-sha2-256**, derivare de chei (RFC 4253)
+      - autentificare cu **parola**, canal de sesiune + **pty + shell** interactiv,
+        control de fereastra (window adjust) — refoloseste x25519/aes/sha256/hmac
+      - syscalls 27-31 (ssh_open/status/read/write/close) + program user
+        `ssh <gazda> [utilizator] [port]` (prompt de parola mascat, Ctrl+Q iese)
+      - **VERIFICAT** contra unui server SSH public real (test.rebex.net): KEX,
+        autentificare, shell criptat, comenzi executate remote
+      - nota onesta: NU verifica cheia gazdei (ca la clientul TLS) — OS de invatare
+- [x] Milestone 45: **Aplicatie Calculator (GUI)** (v0.45):
+      - fereastra noua `CALC_WIN` in desktop: display + grid 4x5 de butoane
+        colorate (cifre, + - * / , %, +/-, backspace, C, =), text anti-aliasing
+      - aritmetica in **virgula fixa** (6 zecimale) fara floating point si fara
+        `__int128` (freestanding nu are `__divti3`) — inmultire/impartire pe 64 biti
+      - se deschide din meniul Start (a 7-a aplicatie) sau cu **Alt+F9**; merge cu
+        mouse-ul si de la tastatura (Enter = , Esc = C, Backspace)
+- [x] Milestone 46: **SSH pe servere reale — metode de autentificare** (v0.46):
+      - descoperire de metode: intai o cerere `none`, apoi alegem in functie de
+        ce ofera serverul (`publickey,password,keyboard-interactive,...`)
+      - autentificare **keyboard-interactive** (RFC 4256) pe langa `password` —
+        multe servere PAM o folosesc; raspundem cu parola la fiecare prompt
+      - **diagnostic clar** pe ecran: la esec afisam metodele acceptate de server
+        (syscall nou `ssh_error`, 32) — se distinge "metoda nesuportata / root
+        interzis" de "parola gresita"
+      - **VERIFICAT** live: parola (shell real pe test.rebex.net), descoperire de
+        metode pe OpenSSH 10.0 (eposta.md) si OpenSSH 10.4 (sdf.org)
+      - nota onesta: multe servere (ex. Debian) resping login-ul cu **parola pentru
+        root** (`PermitRootLogin prohibit-password`) — foloseste un cont ne-root,
+        sau cheie publica (vezi milestone 47)
+- [x] Milestone 47: **Autentificare SSH cu CHEIE PUBLICA (Ed25519)** (v0.47):
+      - **Ed25519 (EdDSA) de la zero** in `kernel/ed25519.c`: SHA-512 propriu +
+        aritmetica pe curba Edwards (adaptat din TweetNaCl); doar semnare +
+        derivarea cheii publice din seed. Fara floating point, fara `__int128`.
+        **TESTAT pe host** contra vectorilor RFC 8032 (pubkey + semnatura, toate OK)
+      - protocol publickey (RFC 4252 §7): blob `ssh-ed25519`, semnatura peste
+        `session_id || cererea`, se incearca **inaintea parolei** (ca la OpenSSH)
+      - program **`sshkey`**: `sshkey gen` genereaza o pereche noua (seed salvat pe
+        disc in `id_ed25519`) si afiseaza linia pentru `~/.ssh/authorized_keys`;
+        `sshkey` fara argument o reafiseaza. Syscalls noi 33 (keygen) / 34 (pubkey)
+      - `ssh` incearca automat cheia daca exista si serverul o accepta; la promptul
+        de parola apesi **Enter** ca sa folosesti cheia
+      - **VERIFICAT end-to-end**: un server **OpenSSH 10.2 real** a acceptat
+        criptografic semnatura Ed25519 a DevOS → shell interactiv (`id` remote:
+        `uid=1000(dev)`), doar cu cheia, fara parola
+- [x] Milestone 48: **Terminal ANSI/VT100 + Caps Lock** (v0.48):
+      - interpretor complet de secvente **ANSI/VT100** in consola (`kernel/vga.c`):
+        pozitionare cursor (`CUP`, `CUU/D/F/B`, `CHA`, `VPA`), stergere (`ED`/`EL`),
+        culori si atribute **SGR** (30-37/40-47/90-107, bold, reverse; mapare
+        ANSI→VGA), regiune de scroll (`DECSTBM`), insert/delete linii/caractere
+        (`IL/DL/ICH/DCH`), reverse index, salvare/restaurare cursor, ecran alternativ
+      - `ssh` traduce sagetile/Home/End/Delete in secvente ANSI → **mc, nano, vim,
+        top, less** si `ls --color` merg in shell-ul SSH
+      - **caractere de chenar (box-drawing)** pentru mc/dialog: decodare **UTF-8**
+        + charset-ul **DEC de linii** (`ESC ( 0`), ambele mapate la glifele CP437
+        ale fontului BIOS (│ ─ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ ═ ║ ░ ▒ ▓ █ ...)
+      - **VERIFICAT vizual**: `nano` (bara de titlu + meniu jos in video invers) si
+        `ls --color=always -la /` (directoare albastre, symlink cyan, executabile
+        verzi, `tmp` cu fundal verde) randate corect din DevOS
+      - **Caps Lock** functional in `kernel/keyboard.c` (XOR cu Shift, doar litere);
+        fix: `'\n'` ramane CR+LF pentru programele locale (ssh/pty trimit "\r\n")
+- [x] Milestone 49: **Aplicatii TUI complet functionale prin SSH (mc/nano/vim)** (v0.49):
+      - **sageti in mod aplicatie** (DECCKM): consola urmareste `ESC [?1h/l`, iar
+        `ssh` trimite `\eOA/B/C/D` cand programul cere modul aplicatie (mc/ncurses),
+        altfel `\e[A..` — altfel ncurses nu recunostea sagetile
+      - **taste F1-F10**: livrate ca secvente xterm (`\eOP..\eOS`, `\e[15~..\e[21~`);
+        `kernel/keyboard.c` trimite F1-F10 simple la terminal (coduri 0xB0-0xB9)
+      - syscall nou 35 (`term_appcursor`) expune starea DECCKM a terminalului
+      - **VERIFICAT la nivel de octeti** prin SSH: sus=`\eOA`, F1=`\eOP`, F5=`\e[15~`;
+        plus box-drawing mc (UTF-8 + charset DEC) randate corect
+- [ ] SSH: verificarea cheii gazdei (known_hosts) + import de chei OpenSSH existente
+- [ ] Font AA si pentru continutul browserului, tabele, mai mult CSS, JPEG
 - [ ] SSH: schimb de chei Diffie-Hellman + cifru, peste TCP
 
 **Limită onestă:** motorul JS rulează JavaScript simplu/vanilla, dar **nu** e V8:

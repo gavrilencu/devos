@@ -72,3 +72,14 @@ uint32_t host_resolve(const char *s);     /* IP direct sau prin DNS; 0 = esec */
 
 int64_t pslist(char *buf, uint64_t maxlen);   /* tabela de task-uri, ca text */
 uint64_t meminfo(void);                       /* memoria fizica libera (bytes) */
+
+/* Client SSH: deschide sesiune, apoi read/write date de canal (shell). */
+int  ssh_open(uint32_t ip, uint16_t port, const char *user, const char *pass);
+int  ssh_status(void);   /* 0=inchis, 1=in curs, 2=gata, -1=eroare */
+int  ssh_read(void *buf, int max);
+int  ssh_write(const void *buf, int len);
+void ssh_close(void);
+int ssh_error(char *buf, int max);
+int ssh_keygen(void);
+int ssh_pubkey(char *buf, int max);
+int term_appcursor(void);        /* 1 daca terminalul e in mod DECCKM (sageti \eO) */

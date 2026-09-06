@@ -21,7 +21,7 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/gdt.o $(BUILD)/isr.o \
          $(BUILD)/mouse.o $(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/netstack.o \
          $(BUILD)/tcp.o $(BUILD)/browser.o $(BUILD)/sha256.o $(BUILD)/aes.o \
          $(BUILD)/x25519.o $(BUILD)/tls.o $(BUILD)/js.o $(BUILD)/inflate.o \
-         $(BUILD)/png.o
+         $(BUILD)/png.o $(BUILD)/ssh.o $(BUILD)/ed25519.o
 
 # Limite impuse de lantul de boot: stage1 citeste 192 de sectoare
 # (8 pentru stage2 + 184 pentru kernel).
@@ -59,7 +59,7 @@ $(BUILD)/guess.bin: user/guess.asm | $(BUILD)
 # 0x8000000000 — kernelul le incarca prin loaderul ELF.
 # -mcmodel=large: adresa de baza nu incape in relocari pe 32 de biti.
 UCFLAGS := $(CFLAGS) -mcmodel=large
-UPROGS  := ush calc edit basic show upper lines nslookup telnet fetch
+UPROGS  := ush calc edit basic show upper lines nslookup telnet fetch ssh sshkey
 
 $(BUILD)/ulib.o: user/lib/ulib.c user/lib/ulib.h | $(BUILD)
 	gcc $(UCFLAGS) -c $< -o $@
@@ -85,7 +85,7 @@ FS_FILES := $(foreach p,$(UPROGS),$(p)=$(BUILD)/$(p).elf) \
             ic_editor.raw=fs/ic_editor.raw ic_taskmgr.raw=fs/ic_taskmgr.raw \
             ic_browser.raw=fs/ic_browser.raw ic_settings.raw=fs/ic_settings.raw \
             ic_reboot.raw=fs/ic_reboot.raw ic_power.raw=fs/ic_power.raw \
-            ic_start.raw=fs/ic_start.raw \
+            ic_start.raw=fs/ic_start.raw ic_calc.raw=fs/ic_calc.raw uifont.bin=fs/uifont.bin \
             docs/bun-venit.txt=fs/docs-bun-venit.txt \
             docs/idei.txt=fs/docs-idei.txt \
             sys/info.txt=fs/sys-info.txt
@@ -95,7 +95,7 @@ $(BUILD)/fs.img: $(BUILD)/mkfs $(UELFS) $(BUILD)/hello.bin \
                  fs/readme.txt fs/splash.raw fs/desk.raw \
                  fs/ic_terminal.raw fs/ic_explorer.raw fs/ic_editor.raw \
                  fs/ic_taskmgr.raw fs/ic_browser.raw fs/ic_settings.raw \
-                 fs/ic_reboot.raw fs/ic_power.raw fs/ic_start.raw \
+                 fs/ic_reboot.raw fs/ic_power.raw fs/ic_start.raw fs/ic_calc.raw fs/uifont.bin \
                  fs/docs-bun-venit.txt fs/docs-idei.txt fs/sys-info.txt
 	$(BUILD)/mkfs $@ $(FS_FILES)
 
@@ -121,6 +121,11 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf
 # ca sa incapa wallpaper-ele Full HD (2 x 8.3 MiB) + iconuri + programe.
 # NOTA: fisierele salvate din DevOS persista in build/myos.img pana la
 # urmatorul `make` care o regenereaza.
+# Asamblarea e marcata .PHONY: pe /mnt/f (DrvFs) mtime-urile pot avea skew
+# fata de WSL, iar make ar putea considera imaginea "la zi" desi kernelul/FS
+# s-au schimbat → imagine STALE cu layout gresit (FS la offset gresit,
+# "superbloc lipsa"). Reasamblarea e ieftina (cat+truncate), deci o rulam mereu.
+.PHONY: $(BUILD)/myos.img
 $(BUILD)/myos.img: $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin $(BUILD)/fs.img
 	cat $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(BUILD)/kernel.bin > $@
 	truncate -s 1M $@

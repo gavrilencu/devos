@@ -15,6 +15,17 @@ UDP/TCP), DNS, server telnet SI client TCP outbound. Iese pe internet!
   - server telnet: de pe Windows  telnet localhost 2323  (sau PuTTY).
   - in terminalul DevOS:  ping 10.0.2.2 ,  nslookup <nume> ,
     telnet <gazda> [port]  (client, Ctrl+Q iese),  fetch <gazda> [cale]  (HTTP).
+  - CLIENT SSH:  ssh <gazda> [utilizator] [port]  - shell securizat, criptat de
+    la zero (curve25519-sha256 + AES-128-CTR + HMAC-SHA256). Autentificare cu
+    parola, keyboard-interactive SAU CHEIE PUBLICA Ed25519 (alege automat).
+    Ex.: ssh test.rebex.net demo  (parola: password). Ctrl+Q iese.
+    NOTA: multe servere (ex. Debian) NU permit login cu parola pentru "root" -
+    foloseste un cont ne-root sau cheie. La esec, se arata metodele acceptate.
+  - CHEIE SSH:  sshkey gen  genereaza o pereche Ed25519 si afiseaza linia de pus
+    in ~/.ssh/authorized_keys pe server. Apoi:  ssh <gazda> <utilizator>  si la
+    promptul de parola apasa Enter -> te conectezi cu cheia, fara parola.
+    Terminalul intelege ANSI/VT100: merg mc, nano, vim, top, less, ls --color.
+    Tasta Caps Lock functioneaza (majuscule fara Shift).
 
 BROWSER WEB (Alt+F7 sau butonul cu glob din taskbar): scrie o adresa in bara
 de sus si apasa Enter, sau click pe un link. Merge HTTP si HTTPS (TLS 1.2 scris
@@ -29,9 +40,14 @@ Nota onesta: motorul JS ruleaza JavaScript simplu/vanilla, NU framework-uri mari
 (V8/Chromium = milioane de linii). Site-urile care isi construiesc totul cu
 React/Angular etc. (ex. Google) se descarca dar nu se randeaza complet.
 
-Taskbar: buton Terminal (click = deschide/comuta; click dreapta = Terminal
-nou), File Manager (Alt+F4), Notepad (Alt+F5), Task Manager (Alt+F6),
-Browser (Alt+F7). La pornire nu e deschis niciun terminal - il deschizi cand ai nevoie.
+Taskbar (centrat, stil Win11) + meniu Start (butonul DevOS sau tasta Windows):
+de acolo pornesti Terminal, File Manager (Alt+F4), Notepad (Alt+F5),
+Task Manager (Alt+F6), Browser (Alt+F7), Setari (Alt+F8), Calculator (Alt+F9)
+si poti da Repornire / Oprire. Ferestre: verde/F11 maximizeaza, galben
+minimizeaza, rosu inchide. La pornire nu e deschis niciun terminal.
+
+Calculator (Alt+F9 sau din meniul Start): +, -, *, / cu zecimale, procent,
++/-, backspace; merge cu mouse-ul sau de la tastatura (Enter = , Esc = C).
 
 Task Manager: vezi toate procesele, CPU%, RAM, dimensiune pe disc si
 locatia; selecteaza un proces si apasa "Termina task" ca sa-l opresti.

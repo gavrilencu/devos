@@ -28,6 +28,7 @@ static const char keymap_shift[64] = {
 static bool shift;
 static bool alt;
 static bool ctrl;
+static bool caps;   /* Caps Lock activ */
 static bool e0;   /* am primit prefixul 0xE0 (taste extinse) */
 
 static void kb_irq(struct int_frame *f)
@@ -79,6 +80,11 @@ static void kb_irq(struct int_frame *f)
         shift = !release;
         return;
     }
+    if (code == 0x3A) {                    /* Caps Lock: comuta la apasare */
+        if (!release)
+            caps = !caps;
+        return;
+    }
 
     /* Alt+F1..F3: comuta la terminal daca e deschis, altfel il deschide */
     if (alt && !release && code >= 0x3B && code < 0x3B + CON_COUNT) {
@@ -109,8 +115,21 @@ static void kb_irq(struct int_frame *f)
         gui_set_toggle();
         return;
     }
+    if (alt && !release && code == 0x40 + CON_COUNT) {   /* Alt+F9 */
+        gui_calc_toggle();
+        return;
+    }
     if (!release && code == 0x57) {      /* F11 = maximizeaza/restaureaza fereastra */
         gui_maximize_focused();
+        return;
+    }
+
+    /* F1..F10 simple (fara Alt) -> coduri abstracte 0xB0..0xB9 pentru terminal
+     * (ssh le traduce in secvente ANSI pt. mc/nano/etc.) */
+    if (!release && !alt && code >= 0x3B && code <= 0x44) {
+        char fk = (char)(0xB0 + (code - 0x3B));
+        if (!gui_key_intercept(fk))
+            console_push_key(fk);
         return;
     }
 
@@ -118,9 +137,14 @@ static void kb_irq(struct int_frame *f)
         return;
 
     char c = shift ? keymap_shift[code] : keymap[code];
+    /* Caps Lock afecteaza doar literele (XOR cu Shift) */
+    if (caps) {
+        if (c >= 'a' && c <= 'z')      c = (char)(c - 'a' + 'A');
+        else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    }
     /* Ctrl+litera -> cod de control (1..26), ex. Ctrl+S=0x13 */
-    if (ctrl && c >= 'a' && c <= 'z')
-        c = (char)(c - 'a' + 1);
+    if (ctrl && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+        c = (char)((c | 0x20) - 'a' + 1);
     if (c && !gui_key_intercept(c))
         console_push_key(c);   /* la terminalul activ */
 }

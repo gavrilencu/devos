@@ -59,5 +59,7 @@ void gui_br_toggle(void);
 void gui_set_toggle(void);
 /* Tasta Windows/Super: deschide/inchide meniul Start */
 void gui_menu_toggle(void);
+/* Alt+F9: deschide/focuseaza/minimizeaza Calculatorul */
+void gui_calc_toggle(void);
 /* F11: maximizeaza/restaureaza fereastra focusata */
 void gui_maximize_focused(void);

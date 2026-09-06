@@ -9,6 +9,7 @@
 #include "pmm.h"
 #include "pipe.h"
 #include "netstack.h"
+#include "ssh.h"
 #include "io.h"
 #include "string.h"
 #include "kprintf.h"
@@ -40,6 +41,15 @@
 #define SYS_TCP_CLOSE   24
 #define SYS_DNS         25
 #define SYS_DNS_RES     26
+#define SYS_SSH_OPEN    27
+#define SYS_SSH_STATUS  28
+#define SYS_SSH_READ    29
+#define SYS_SSH_WRITE   30
+#define SYS_SSH_CLOSE   31
+#define SYS_SSH_ERROR   32
+#define SYS_SSH_KEYGEN  33
+#define SYS_SSH_PUBKEY  34
+#define SYS_TERM_APPCUR 35
 
 #define FWRITE_MAX (512 * 1024)
 
@@ -346,6 +356,80 @@ uint64_t syscall_handler(struct int_frame *f)
         f->rax = (uint64_t)(int64_t)id;
         return (uint64_t)f;
     }
+
+    case SYS_SSH_OPEN: {
+        char user[64], pass[64];
+        if (copy_str(f->rdx, user, sizeof(user)) < 0 ||
+            copy_str(f->rcx, pass, sizeof(pass)) < 0) {
+            f->rax = (uint64_t)-1;
+            return (uint64_t)f;
+        }
+        f->rax = (uint64_t)(int64_t)ssh_open((uint32_t)f->rdi,
+                                             (uint16_t)f->rsi, user, pass);
+        return (uint64_t)f;
+    }
+
+    case SYS_SSH_STATUS:
+        f->rax = (uint64_t)(int64_t)ssh_status();
+        return (uint64_t)f;
+
+    case SYS_SSH_READ: {
+        uint64_t ubuf = f->rdi, max = f->rsi;
+        if (max == 0 || max > 4096 || !user_range(ubuf, max)) {
+            f->rax = (uint64_t)-1;
+            return (uint64_t)f;
+        }
+        f->rax = (uint64_t)(int64_t)ssh_read((void *)ubuf, (int)max);
+        return (uint64_t)f;
+    }
+
+    case SYS_SSH_WRITE: {
+        uint64_t ubuf = f->rdi, len = f->rsi;
+        if (len > 4096 || !user_range(ubuf, len)) {
+            f->rax = (uint64_t)-1;
+            return (uint64_t)f;
+        }
+        f->rax = (uint64_t)(int64_t)ssh_write((const void *)ubuf, (int)len);
+        return (uint64_t)f;
+    }
+
+    case SYS_SSH_CLOSE:
+        ssh_close();
+        f->rax = 0;
+        return (uint64_t)f;
+
+    case SYS_SSH_ERROR: {
+        uint64_t ubuf = f->rdi, max = f->rsi;
+        if (max == 0 || max > 4096 || !user_range(ubuf, max)) {
+            f->rax = (uint64_t)-1;
+            return (uint64_t)f;
+        }
+        const char *e = ssh_error();
+        char *d = (char *)ubuf;
+        uint64_t n = 0;
+        while (e && e[n] && n < max - 1) { d[n] = e[n]; n++; }
+        d[n] = 0;
+        f->rax = n;
+        return (uint64_t)f;
+    }
+
+    case SYS_SSH_KEYGEN:
+        f->rax = (uint64_t)(int64_t)ssh_keygen();
+        return (uint64_t)f;
+
+    case SYS_SSH_PUBKEY: {
+        uint64_t ubuf = f->rdi, max = f->rsi;
+        if (max == 0 || max > 4096 || !user_range(ubuf, max)) {
+            f->rax = (uint64_t)-1;
+            return (uint64_t)f;
+        }
+        f->rax = (uint64_t)(int64_t)ssh_get_pubkey_line((char *)ubuf, (int)max);
+        return (uint64_t)f;
+    }
+
+    case SYS_TERM_APPCUR:
+        f->rax = (uint64_t)(int64_t)console_app_cursor(task_current_term());
+        return (uint64_t)f;
 
     default:
         f->rax = (uint64_t)-1;

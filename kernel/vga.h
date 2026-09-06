@@ -29,6 +29,7 @@ enum vga_color {
 void console_init(void);
 void console_switch(int term);
 int console_active(void);
+int console_app_cursor(int t);   /* DECCKM: 1 daca sagetile trebuie trimise \eO.. */
 
 /* Mod grafic: enter_gfx (chemat automat la init daca stage2 a setat VBE)
  * opreste scrierile in memoria text 0xB8000; enable_render porneste

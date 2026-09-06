@@ -98,7 +98,7 @@ static void run_program(const char *name, const char *args, int bg)
 int umain(const char *args)
 {
     (void)args;
-    print("ush - shell-ul user MyOS (ring 3). Scrie 'help'.\n");
+    print("ush - shell-ul user DevOS (ring 3). Scrie 'help'.\n");
 
     for (;;) {
         print("ush> ");
@@ -148,6 +148,8 @@ int umain(const char *args)
         if (streq(cmd, "help")) {
             print("builtin: help, echo, ls, cat, cp, mv, rm, ps, mem, date, ping, uptime, clear, exit\n");
             print("retea: nslookup <nume>, telnet <gazda> [port], fetch <gazda> [cale]\n");
+            print("       ssh <gazda> [utilizator] [port]  (shell securizat)\n");
+            print("       sshkey [gen]  (cheie SSH: parola sau cheie publica)\n");
             print("orice altceva = program de pe disc: calc, guess, edit <f>, basic <f>\n");
             print("pipeline: prog1 | prog2; '&' = fundal; Alt+F1..F3 = alt terminal\n");
             print("sagetile sus/jos = istoricul comenzilor\n");
@@ -265,9 +267,6 @@ int umain(const char *args)
                 }
                 sleep_ms(300);
             }
-        } else if (streq(cmd, "ssh")) {
-            print("ssh necesita criptografie (schimb de chei, AES) - in lucru.\n");
-            print("fundatia de retea (DNS, TCP client, HTTP) e gata; cripto urmeaza.\n");
         } else if (streq(cmd, "date")) {
             uint64_t t = rtc_time();
             char s[9];

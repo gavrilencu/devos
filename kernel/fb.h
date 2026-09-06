@@ -45,4 +45,14 @@ void fb_char(int x, int y, char ch, uint32_t fg, uint32_t bg);   /* 8x16 */
 void fb_text(int x, int y, const char *s, uint32_t fg, uint32_t bg);
 void fb_text_scaled(int x, int y, const char *s, uint32_t fg, int scale);
 
+/* Font UI cu anti-aliasing (atlas incarcat de pe disc, fs/uifont.bin).
+ * Textul se amesteca (alpha) peste ce e deja desenat — deseneaza fundalul
+ * INAINTE. Daca fontul nu e incarcat, cade pe bitmap-ul 8x16 (transparent). */
+void fb_set_uifont(const uint8_t *data);
+int  fb_ui_ok(void);
+int  fb_ui_height(void);                 /* inaltimea liniei */
+int  fb_ui_text_w(const char *s);        /* latimea in pixeli */
+void fb_ui_text(int x, int y, const char *s, uint32_t color);
+void fb_ui_text_scaled(int x, int y, const char *s, uint32_t color, int scale);
+
 uint32_t fb_vga_color(int idx);   /* paleta celor 16 culori de text */

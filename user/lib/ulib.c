@@ -378,6 +378,21 @@ uint64_t meminfo(void)
     return (uint64_t)syscall2(14, 0, 0);
 }
 
+/* --- Client SSH (criptografia e in kernel) --- */
+int ssh_open(uint32_t ip, uint16_t port, const char *user, const char *pass)
+{
+    return (int)syscall4(27, (int64_t)ip, (int64_t)port,
+                         (int64_t)user, (int64_t)pass);
+}
+int ssh_status(void) { return (int)syscall2(28, 0, 0); }
+int ssh_read(void *buf, int max) { return (int)syscall2(29, (int64_t)buf, (int64_t)max); }
+int ssh_write(const void *buf, int len) { return (int)syscall2(30, (int64_t)buf, (int64_t)len); }
+void ssh_close(void) { syscall2(31, 0, 0); }
+int ssh_error(char *buf, int max) { return (int)syscall2(32, (int64_t)buf, (int64_t)max); }
+int ssh_keygen(void) { return (int)syscall2(33, 0, 0); }
+int ssh_pubkey(char *buf, int max) { return (int)syscall2(34, (int64_t)buf, (int64_t)max); }
+int term_appcursor(void) { return (int)syscall2(35, 0, 0); }
+
 /* Punctul de intrare: kernelul sare aici cu stiva pregatita si cu
  * argumentele programului (string) in RDI. Programele definesc umain()
  * — "main" ar avea semnatura speciala impusa de compilator. */

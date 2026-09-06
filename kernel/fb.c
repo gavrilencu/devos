@@ -367,6 +367,101 @@ void fb_text_scaled(int x, int y, const char *s, uint32_t fg, int scale)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Font UI cu anti-aliasing (atlas de glife proportional, incarcat de pe
+ * disc: fs/uifont.bin generat cu scripts/genfont.ps1). Format fisier:
+ * [CW][CH][first][count] + adv[count] + coverage[count*CW*CH] (1 octet/pixel,
+ * 0..255 = acoperire). Textul se amesteca (alpha) peste ce e deja desenat. */
+static const uint8_t *uif;
+static int uif_cw, uif_ch, uif_first, uif_count;
+static const uint8_t *uif_adv, *uif_cov;
+
+void fb_set_uifont(const uint8_t *data)
+{
+    if (!data)
+        return;
+    int cw = data[0], ch = data[1], first = data[2], count = data[3];
+    if (cw <= 0 || cw > 64 || ch <= 0 || ch > 64 || count <= 0 || count > 128)
+        return;                        /* header invalid: ramanem pe bitmap */
+    uif_cw = cw; uif_ch = ch; uif_first = first; uif_count = count;
+    uif_adv = data + 4;
+    uif_cov = data + 4 + count;
+    uif = data;
+}
+
+int fb_ui_ok(void)     { return uif != 0; }
+int fb_ui_height(void) { return uif ? uif_ch : 16; }
+
+static int uif_index(unsigned char c)
+{
+    if (c < uif_first || c >= uif_first + uif_count)
+        return -1;
+    return c - uif_first;
+}
+
+int fb_ui_text_w(const char *s)
+{
+    if (!uif) {
+        int n = 0; while (s[n]) n++; return n * 8;
+    }
+    int w = 0;
+    for (; *s; s++) {
+        int i = uif_index((unsigned char)*s);
+        w += (i < 0) ? uif_adv[0] : uif_adv[i];
+    }
+    return w;
+}
+
+/* deseneaza text AA cu culoarea `color`, amestecat peste fundalul existent.
+ * `scale` = 1 normal; >1 mareste glifele (pentru titluri). */
+void fb_ui_text_scaled(int x, int y, const char *s, uint32_t color, int scale)
+{
+    if (scale < 1) scale = 1;
+    if (!uif) {                        /* fallback: bitmap 8x16, doar pixelii pe fundal transparent */
+        for (; *s; s++, x += 8 * scale) {
+            const uint8_t *g = font + (uint8_t)*s * 16;
+            for (int j = 0; j < 16; j++) {
+                uint8_t bits = g[j];
+                for (int i = 0; i < 8; i++)
+                    if (bits & (0x80 >> i))
+                        fb_fill(x + i * scale, y + j * scale, scale, scale, color);
+            }
+        }
+        return;
+    }
+    int x0 = x;
+    for (; *s; s++) {
+        int idx = uif_index((unsigned char)*s);
+        if (idx < 0) { x += uif_adv[0] * scale; continue; }
+        const uint8_t *g = uif_cov + (uint64_t)idx * uif_cw * uif_ch;
+        for (int gy = 0; gy < uif_ch; gy++) {
+            for (int gx = 0; gx < uif_cw; gx++) {
+                int a = g[gy * uif_cw + gx];
+                if (!a) continue;
+                int px = x + gx * scale, py = y + gy * scale;
+                for (int sy = 0; sy < scale; sy++) {
+                    int yy = py + sy;
+                    if (yy < cy0 || yy >= cy1) continue;
+                    for (int sx = 0; sx < scale; sx++) {
+                        int xx = px + sx;
+                        if (xx < cx0 || xx >= cx1) continue;
+                        uint32_t bg = draw[(uint64_t)yy * dstride + xx];
+                        draw[(uint64_t)yy * dstride + xx] =
+                            (a >= 255) ? color : blend(color, bg, a);
+                    }
+                }
+            }
+        }
+        x += uif_adv[idx] * scale;
+    }
+    mark(x0, y, x - x0, uif_ch * scale);
+}
+
+void fb_ui_text(int x, int y, const char *s, uint32_t color)
+{
+    fb_ui_text_scaled(x, y, s, color, 1);
+}
+
 uint32_t fb_vga_color(int idx)
 {
     static const uint32_t pal[16] = {

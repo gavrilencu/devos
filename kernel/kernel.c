@@ -82,7 +82,7 @@ void kmain(void)
     console_init();
 
     con_color(VGA_LIGHT_CYAN, VGA_BLACK);
-    kprintf("MyOS v0.34 (x86-64)\n\n");
+    kprintf("DevOS v0.49 (x86-64)\n\n");
     con_color(VGA_LIGHT_GREY, VGA_BLACK);
 
     gdt_init();
@@ -162,7 +162,7 @@ void kmain(void)
      * Nu mai pornim terminale automat: utilizatorul le deschide din
      * taskbar (butonul Terminal, click sau click dreapta > Terminal nou).
      * Daca nu suntem in mod grafic, cadem in shell-ul kernel. */
-    kprintf("\nBun venit in MyOS!\n");
+    kprintf("\nBun venit in DevOS!\n");
 
     uint32_t ush_size = 0;
     void *ush = fs_read_file("ush", &ush_size);
