@@ -57,6 +57,9 @@ void gui_tm_toggle(void);
 void gui_br_toggle(void);
 /* Alt+F8: deschide/focuseaza/minimizeaza Setarile */
 void gui_set_toggle(void);
+/* Strange specificatiile hardware (CPU/GPU/disc) pentru pagina Specificatii.
+ * Se cheama o data la boot (context de task, IF=1). */
+void gui_sysinfo_gather(void);
 /* Tasta Windows/Super: deschide/inchide meniul Start */
 void gui_menu_toggle(void);
 /* Alt+F9: deschide/focuseaza/minimizeaza Calculatorul */

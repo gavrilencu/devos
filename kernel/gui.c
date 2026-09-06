@@ -8,6 +8,9 @@
 #include "io.h"
 #include "string.h"
 #include "browser.h"
+#include "cpuinfo.h"
+#include "ata.h"
+#include "pci.h"
 
 #define TB_H 54                 /* inaltimea taskbar-ului (stil Win11) */
 
@@ -2047,10 +2050,10 @@ int gui_key_intercept(char ch)
         return 1;
     }
 
-    /* Setari focusat: 1/2/3 = rezolutie (in tabul Display), d/a = taburi */
+    /* Setari focusat: 1/2/3 = rezolutie (tab Display), d/a/s = taburi */
     if (fb_active() && ready && fwin == SET_WIN && win_vis[SET_WIN]) {
-        if (ch == 'd' || ch == 'a') {
-            int nt = (ch == 'd') ? 0 : 1;
+        if (ch == 'd' || ch == 'a' || ch == 's') {
+            int nt = (ch == 'd') ? 0 : (ch == 'a') ? 1 : 2;
             if (set_tab != nt) { set_tab = nt; set_content_draw(); }
         } else if (ch >= '1' && ch <= '3' && set_tab == 0) {
             gui_set_resolution(set_res[ch - '1'].w, set_res[ch - '1'].h);
@@ -3011,10 +3014,10 @@ static void set_tab_draw(int idx, int hov)
     int active = (set_tab == idx);
     uint32_t bg = active ? COL_ACCENT : (hov ? COL_CARD_HOV : 0x12151C);
     fb_fill_round2(bx, by, bw, bh, 8, bg, 1, 0x12151C);
-    icon16(bx + 8, by + 9, idx == 0 ? ic_chart : ic_gear,
-           active ? 0xFFFFFF : COL_DIM);
-    uitext(bx + 34, by + 9, idx == 0 ? "Display" : "Despre",
-            active ? 0xFFFFFF : COL_TEXT, bg);
+    const uint16_t *ic = (idx == 0) ? ic_chart : (idx == 1) ? ic_gear : ic_chip;
+    const char *lbl = (idx == 0) ? "Display" : (idx == 1) ? "Despre" : "Specificatii";
+    icon16(bx + 8, by + 9, ic, active ? 0xFFFFFF : COL_DIM);
+    uitext(bx + 34, by + 9, lbl, active ? 0xFFFFFF : COL_TEXT, bg);
 }
 
 /* panoul Display: alegerea rezolutiei */
@@ -3065,6 +3068,129 @@ static void set_panel_about(int cx, int cy)
     uitext(px, cy + 330, line, COL_DIM, SET_BG);
 }
 
+/* --- pagina Specificatii: date hardware strinse la boot --- */
+static char sys_cpu[64];      /* model/brand procesor */
+static char sys_freq[56];     /* "~NNNN MHz, N nuclee logice" */
+static char sys_feat[64];     /* instructiuni suportate */
+static char sys_gpu[56];      /* placa video */
+static char sys_disk[48];     /* model disc */
+static char sys_disksz[48];   /* capacitate disc */
+static int  sys_ready;
+
+static int sysi_app(char *d, int p, const char *s){ while (*s) d[p++] = *s++; return p; }
+static int sysi_num(char *d, int p, uint64_t v){ char t[24]; fmt_u(t, v); return sysi_app(d, p, t); }
+
+static const char *pci_vendor_name(uint16_t v)
+{
+    switch (v) {
+    case 0x1234: return "QEMU stdvga (Bochs)";
+    case 0x1b36: return "Red Hat QXL";
+    case 0x1af4: return "virtio-gpu";
+    case 0x10de: return "NVIDIA";
+    case 0x8086: return "Intel";
+    case 0x1002: return "AMD / ATI";
+    case 0x15ad: return "VMware SVGA";
+    case 0x80ee: return "VirtualBox VGA";
+    case 0x1013: return "Cirrus Logic";
+    default:     return "placa video";
+    }
+}
+
+void gui_sysinfo_gather(void)
+{
+    int p;
+    char brand[49];
+    if (cpu_brand(brand) && brand[0]) {
+        char *b = brand; while (*b == ' ') b++;
+        p = sysi_app(sys_cpu, 0, b); sys_cpu[p] = 0;
+    } else {
+        char vend[13]; cpu_vendor(vend);
+        p = sysi_app(sys_cpu, 0, vend); sys_cpu[p] = 0;
+    }
+    p = sysi_app(sys_freq, 0, "~");
+    p = sysi_num(sys_freq, p, (uint64_t)cpu_mhz());
+    p = sysi_app(sys_freq, p, " MHz,  ");
+    p = sysi_num(sys_freq, p, (uint64_t)cpu_logical());
+    p = sysi_app(sys_freq, p, " nuclee logice"); sys_freq[p] = 0;
+
+    cpu_features(sys_feat, sizeof(sys_feat));
+
+    /* placa video: primul dispozitiv PCI de clasa 0x03 (display) */
+    p = 0; int found = 0;
+    for (int bus = 0; bus < 2 && !found; bus++)
+        for (int dev = 0; dev < 32 && !found; dev++) {
+            uint32_t id = pci_read32((uint8_t)bus, (uint8_t)dev, 0, 0x00);
+            if ((id & 0xFFFF) == 0xFFFF) continue;
+            uint32_t cls = pci_read32((uint8_t)bus, (uint8_t)dev, 0, 0x08);
+            if (((cls >> 24) & 0xFF) == 0x03) {
+                p = sysi_app(sys_gpu, p, pci_vendor_name((uint16_t)(id & 0xFFFF)));
+                found = 1;
+            }
+        }
+    if (!found) p = sysi_app(sys_gpu, p, "placa video (necunoscuta)");
+    sys_gpu[p] = 0;
+
+    /* disc: comanda IDENTIFY */
+    char model[41]; uint64_t sect = 0;
+    if (ata_identify(model, &sect) == 0) {
+        if (model[0]) { char *m = model; while (*m == ' ') m++; p = sysi_app(sys_disk, 0, m); }
+        else          p = sysi_app(sys_disk, 0, "disc ATA");
+        sys_disk[p] = 0;
+        p = sysi_num(sys_disksz, 0, sect / 2048);
+        p = sysi_app(sys_disksz, p, " MiB  (");
+        p = sysi_num(sys_disksz, p, sect);
+        p = sysi_app(sys_disksz, p, " sectoare)"); sys_disksz[p] = 0;
+    } else {
+        p = sysi_app(sys_disk, 0, "disc ATA (necunoscut)"); sys_disk[p] = 0;
+        sys_disksz[0] = 0;
+    }
+    sys_ready = 1;
+}
+
+/* panoul Specificatii: procesor, RAM, placa video, disc */
+static void set_panel_system(int cx, int cy)
+{
+    int px = cx + SET_SIDE_W + 30;
+    int y  = cy + 16;
+    char buf[96];
+    int p;
+
+    fb_ui_text_scaled(px, y, "Specificatii", COL_TEXT, 2);
+    y += 44;
+    fb_fill(px, y, WCONT_W - SET_SIDE_W - 60, 1, 0x2C3542);
+    y += 12;
+
+    if (!sys_ready) gui_sysinfo_gather();
+
+    icon16(px, y, ic_chip, COL_ACCENT_HI);
+    uitext(px + 24, y, "Procesor", COL_ACCENT_HI, SET_BG); y += 24;
+    uitext(px + 16, y, sys_cpu, COL_TEXT, SET_BG); y += 20;
+    uitext(px + 16, y, sys_freq, COL_DIM, SET_BG); y += 20;
+    p = sysi_app(buf, 0, "Instructiuni: "); p = sysi_app(buf, p, sys_feat); buf[p] = 0;
+    uitext(px + 16, y, buf, COL_DIM, SET_BG); y += 30;
+
+    uitext(px, y, "Memorie RAM", COL_ACCENT_HI, SET_BG); y += 24;
+    p = sysi_app(buf, 0, "Total: ");
+    p = sysi_num(buf, p, pmm_managed_bytes() / (1024 * 1024));
+    p = sysi_app(buf, p, " MiB    Liber: ");
+    p = sysi_num(buf, p, pmm_free_bytes() / (1024 * 1024));
+    p = sysi_app(buf, p, " MiB"); buf[p] = 0;
+    uitext(px + 16, y, buf, COL_TEXT, SET_BG); y += 30;
+
+    uitext(px, y, "Placa video", COL_ACCENT_HI, SET_BG); y += 24;
+    uitext(px + 16, y, sys_gpu, COL_TEXT, SET_BG); y += 20;
+    p = sysi_app(buf, 0, "Rezolutie: ");
+    p = sysi_num(buf, p, (uint64_t)fb_width());
+    p = sysi_app(buf, p, " x ");
+    p = sysi_num(buf, p, (uint64_t)fb_height());
+    p = sysi_app(buf, p, " x 32 bpp"); buf[p] = 0;
+    uitext(px + 16, y, buf, COL_DIM, SET_BG); y += 30;
+
+    uitext(px, y, "Disc", COL_ACCENT_HI, SET_BG); y += 24;
+    uitext(px + 16, y, sys_disk, COL_TEXT, SET_BG); y += 20;
+    uitext(px + 16, y, sys_disksz, COL_DIM, SET_BG);
+}
+
 static void set_content_draw(void)
 {
     g_curwin = SET_WIN;
@@ -3074,20 +3200,22 @@ static void set_content_draw(void)
     fb_fill(cx, cy, SET_SIDE_W, WCONT_H, 0x12151C);
     icon16(cx + 12, cy + 20, ic_gear, COL_ACCENT_HI);
     uitext(cx + 36, cy + 20, "Setari", COL_TEXT, 0x12151C);
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 3; i++)
         set_tab_draw(i, hover_id == 74 + i);
 
     if (set_tab == 0)
         set_panel_display(cx, cy);
-    else
+    else if (set_tab == 1)
         set_panel_about(cx, cy);
+    else
+        set_panel_system(cx, cy);
 }
 
 static int set_hover_at(int x, int y)
 {
     if (!win_vis[SET_WIN] || win_at(x, y) != SET_WIN)
         return -1;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         int bx, by, bw, bh;
         set_tab_rect(i, &bx, &by, &bw, &bh);
         if (rect_hit(x, y, bx, by, bw, bh))
@@ -3127,7 +3255,7 @@ static void gui_set_resolution(int w, int h)
 
 static void set_content_click(int mx, int my)
 {
-    for (int i = 0; i < 2; i++) {       /* taburi */
+    for (int i = 0; i < 3; i++) {       /* taburi */
         int bx, by, bw, bh;
         set_tab_rect(i, &bx, &by, &bw, &bh);
         if (rect_hit(mx, my, bx, by, bw, bh)) {

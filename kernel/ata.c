@@ -18,6 +18,7 @@
 #define CMD_READ_SECTORS  0x20
 #define CMD_WRITE_SECTORS 0x30
 #define CMD_FLUSH_CACHE   0xE7
+#define CMD_IDENTIFY      0xEC
 
 static void wait_not_busy(void)
 {
@@ -51,6 +52,54 @@ int ata_read(uint32_t lba, uint32_t count, void *buf)
         insw(ATA_DATA, p, 256);    /* 256 de cuvinte = 512 bytes */
         p += 512;
         lba++;
+    }
+    return 0;
+}
+
+int ata_identify(char *model, uint64_t *sectors)
+{
+    wait_not_busy();
+    outb(ATA_DRIVE, 0xE0);              /* master */
+    outb(ATA_SECCNT, 0);
+    outb(ATA_LBA_LO, 0);
+    outb(ATA_LBA_MID, 0);
+    outb(ATA_LBA_HI, 0);
+    outb(ATA_CMD, CMD_IDENTIFY);
+
+    if (inb(ATA_STATUS) == 0)
+        return -1;                      /* niciun disc */
+    while (inb(ATA_STATUS) & ST_BSY)
+        ;
+    if (inb(ATA_LBA_MID) != 0 || inb(ATA_LBA_HI) != 0)
+        return -1;                      /* nu e ATA (ATAPI/SATA)? */
+    for (;;) {
+        uint8_t st = inb(ATA_STATUS);
+        if (st & ST_ERR)
+            return -1;
+        if (st & ST_DRQ)
+            break;
+    }
+
+    uint16_t id[256];
+    insw(ATA_DATA, id, 256);
+
+    if (model) {                        /* cuvintele 27..46 = model, ASCII swap */
+        for (int i = 0; i < 20; i++) {
+            model[i * 2]     = (char)(id[27 + i] >> 8);
+            model[i * 2 + 1] = (char)(id[27 + i] & 0xFF);
+        }
+        model[40] = 0;
+        for (int i = 39; i >= 0 && (model[i] == ' ' || model[i] == 0); i--)
+            model[i] = 0;
+    }
+    if (sectors) {
+        uint64_t s = 0;
+        if (id[83] & 0x400)             /* LBA48 suportat */
+            s = (uint64_t)id[100] | ((uint64_t)id[101] << 16) |
+                ((uint64_t)id[102] << 32) | ((uint64_t)id[103] << 48);
+        if (s == 0)                     /* altfel LBA28 */
+            s = (uint64_t)id[60] | ((uint64_t)id[61] << 16);
+        *sectors = s;
     }
     return 0;
 }

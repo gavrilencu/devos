@@ -20,6 +20,7 @@
 #include "netstack.h"
 #include "browser.h"
 #include "shell.h"
+#include "cpuinfo.h"
 
 extern char stack_top[];   /* din entry.asm */
 
@@ -133,6 +134,9 @@ void kmain(void)
     mouse_init();
     __asm__ volatile("sti");
     kprintf("[ok] Intreruperi active: PIT, tastatura (IRQ1), mouse (IRQ12)\n");
+
+    cpu_info_init();        /* masoara frecventa CPU (are nevoie de PIT + IF=1) */
+    gui_sysinfo_gather();   /* strange specificatiile hardware (CPU/GPU/disc) */
 
     if (net_init()) {            /* placa de retea (RTL8139) */
         net_stack_init();        /* Ethernet + ARP + IP + ICMP */
