@@ -82,7 +82,7 @@ $(BUILD)/guess.bin: user/guess.asm | $(BUILD)
 # 0x8000000000 — kernelul le incarca prin loaderul ELF.
 # -mcmodel=large: adresa de baza nu incape in relocari pe 32 de biti.
 UCFLAGS := $(CFLAGS) -mcmodel=large
-UPROGS  := ush calc edit basic show upper lines nslookup telnet fetch ssh sshkey stacktest
+UPROGS  := ush calc edit basic show upper lines nslookup telnet fetch ssh sshkey stacktest proctest hi
 
 $(BUILD)/ulib.o: user/lib/ulib.c user/lib/ulib.h | $(BUILD)
 	gcc $(UCFLAGS) -c $< -o $@

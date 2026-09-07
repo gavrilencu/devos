@@ -39,6 +39,8 @@ struct task {
     address_space_t space; /* PML4-ul cu care ruleaza (CR3) */
     enum task_state state;
     int user;              /* 1 = task ring 3, cu spatiu de adrese propriu */
+    int parent;            /* pid-ul (slotul) procesului parinte */
+    int exit_code;         /* codul de iesire (0..255), retinut pentru wait() */
     int term;              /* terminalul virtual la care scrie/citeste */
     int in_pipe;           /* stdin redirectat dintr-un pipe (-1 = tastatura) */
     int out_pipe;          /* stdout redirectat intr-un pipe (-1 = consola) */
@@ -54,6 +56,32 @@ static struct task tasks[MAX_TASKS];
 static int current;
 static int sched_enabled;
 static uint64_t cpu_window;    /* tick-uri de la ultima resetare a CPU% */
+
+/* Jurnal de iesiri: cand un proces e reciclat (reap), ii retinem codul de
+ * iesire cateva pozitii, ca parintele sa-l poata culege prin wait() chiar
+ * dupa ce slotul a fost eliberat. (pid = index de slot; fara numere de
+ * generatie inca — vezi nota din README.) */
+#define EXITLOG_N 16
+static struct { int pid; int code; int valid; } exitlog[EXITLOG_N];
+static int exitlog_head;
+
+static void exitlog_put(int pid, int code)
+{
+    exitlog[exitlog_head].pid   = pid;
+    exitlog[exitlog_head].code  = code;
+    exitlog[exitlog_head].valid = 1;
+    exitlog_head = (exitlog_head + 1) % EXITLOG_N;
+}
+
+static int exitlog_take(int pid)
+{
+    for (int i = 0; i < EXITLOG_N; i++)
+        if (exitlog[i].valid && exitlog[i].pid == pid) {
+            exitlog[i].valid = 0;
+            return exitlog[i].code;
+        }
+    return -1;
+}
 
 extern char stack_top[];   /* stiva din entry.asm, folosita de task 0 */
 
@@ -91,6 +119,8 @@ void sched_init(void)
     { const char *k = "(kernel)"; int i = 0; for (; k[i]; i++) tasks[0].file[i] = k[i]; tasks[0].file[i] = '\0'; }
     tasks[0].in_pipe = -1;
     tasks[0].out_pipe = -1;
+    tasks[0].parent = 0;         /* init e propriul lui parinte (ppid 0) */
+    tasks[0].exit_code = 0;
     current = 0;
     sched_enabled = 1;
 }
@@ -144,6 +174,8 @@ int task_create(const char *name, void (*entry)(void))
     tasks[id].wake_tick  = 0;
     tasks[id].space      = vmm_kernel_space();
     tasks[id].user       = 0;
+    tasks[id].parent     = current;
+    tasks[id].exit_code  = 0;
     tasks[id].term       = tasks[current].term;
     tasks[id].in_pipe    = -1;
     tasks[id].out_pipe   = -1;
@@ -263,6 +295,8 @@ int task_create_user(const char *name, const void *blob, uint64_t size,
     tasks[id].wake_tick  = 0;
     tasks[id].space      = space;
     tasks[id].user       = 1;
+    tasks[id].parent     = current;
+    tasks[id].exit_code  = 0;
     tasks[id].term       = (term >= 0 && term < CON_COUNT)
                                ? term : tasks[current].term;
     tasks[id].in_pipe    = -1;
@@ -304,6 +338,13 @@ void task_exit(void)
 
 void task_kill_current(void)
 {
+    tasks[current].exit_code = 255;   /* omorat (nu iesire normala) */
+    tasks[current].state = T_DYING;
+}
+
+void task_exit_current(int code)
+{
+    tasks[current].exit_code = code & 0xFF;
     tasks[current].state = T_DYING;
 }
 
@@ -321,6 +362,202 @@ int task_current_id(void)
 int task_current_term(void)
 {
     return tasks[current].term;
+}
+
+int task_current_ppid(void)
+{
+    return tasks[current].parent;
+}
+
+/* fork(): duplica procesul curent. Copilul primeste o COPIE a spatiului de
+ * adrese user si un cadru de intrerupere identic cu al parintelui, dar cu
+ * RAX=0 — deci in copil fork() intoarce 0, iar in parinte intoarce pid-ul
+ * copilului. Doar pentru procese user. */
+int task_fork(struct int_frame *pf)
+{
+    uint64_t fl = irq_save();
+
+    if (!tasks[current].user) {           /* fork are sens doar pt. procese user */
+        irq_restore(fl);
+        return -1;
+    }
+
+    int id = -1;
+    for (int i = 0; i < MAX_TASKS; i++)
+        if (tasks[i].state == T_UNUSED) { id = i; break; }
+    if (id < 0) {
+        irq_restore(fl);
+        return -1;
+    }
+
+    uint64_t kstack = pmm_alloc_contig(STACK_PAGES);
+    if (kstack == 0) {
+        irq_restore(fl);
+        return -1;
+    }
+
+    address_space_t space = vmm_create_space();
+    if (!space) {
+        for (uint64_t p = 0; p < STACK_PAGES; p++)
+            pmm_free(kstack + p * PMM_FRAME_SIZE);
+        irq_restore(fl);
+        return -1;
+    }
+    /* copie completa a memoriei user a parintelui */
+    if (vmm_fork_user(space, tasks[current].space) < 0) {
+        vmm_destroy_space(space);
+        for (uint64_t p = 0; p < STACK_PAGES; p++)
+            pmm_free(kstack + p * PMM_FRAME_SIZE);
+        irq_restore(fl);
+        return -1;
+    }
+
+    /* cadrul copilului = copia cadrului parintelui, dar cu RAX=0 */
+    uint64_t top = kstack + STACK_SIZE;
+    struct int_frame *cf = (struct int_frame *)(top - sizeof(struct int_frame));
+    *cf = *pf;
+    cf->rax = 0;
+
+    tasks[id].rsp        = (uint64_t)cf;
+    tasks[id].stack_base = kstack;
+    tasks[id].kstack_top = top;
+    tasks[id].wake_tick  = 0;
+    tasks[id].space      = space;
+    tasks[id].user       = 1;
+    tasks[id].parent     = current;
+    tasks[id].exit_code  = 0;
+    tasks[id].term       = tasks[current].term;
+    tasks[id].in_pipe    = -1;            /* copilul nu mosteneste pipe-urile */
+    tasks[id].out_pipe   = -1;
+    tasks[id].mem_kb     = tasks[current].mem_kb;
+    tasks[id].disk_kb    = tasks[current].disk_kb;
+    tasks[id].cpu_acc    = 0;
+    tasks[id].cpu_pct    = 0;
+    for (int i = 0; i < 24; i++) tasks[id].file[i] = tasks[current].file[i];
+    set_name(&tasks[id], tasks[current].name);
+    tasks[id].state      = T_READY;
+
+    irq_restore(fl);
+    return id;
+}
+
+/* exec(): inlocuieste imaginea procesului curent cu programul `blob`. Pastreaza
+ * pid-ul, parintele si stiva de kernel; construieste un spatiu de adrese nou,
+ * comuta pe el, elibereaza pe cel vechi si reseteaza cadrul `f` la noul punct
+ * de intrare. La succes NU se mai intoarce in vechiul cod (returneaza `f`
+ * pregatit pentru noul program). Intoarce -1 doar daca a esuat inainte de a
+ * comuta (procesul vechi ramane intact). */
+int task_exec(struct int_frame *f, const char *name,
+              const void *blob, uint64_t size, const char *args)
+{
+    uint64_t fl = irq_save();
+
+    if (!tasks[current].user) {
+        irq_restore(fl);
+        return -1;
+    }
+
+    address_space_t space = vmm_create_space();
+    if (!space) {
+        irq_restore(fl);
+        return -1;
+    }
+
+    uint64_t entry = USER_CODE_BASE;
+    const uint8_t *b = blob;
+    if (size >= 4 && b[0] == 0x7F && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') {
+        if (elf_load(space, blob, size, &entry) < 0) {
+            vmm_destroy_space(space);
+            irq_restore(fl);
+            return -1;
+        }
+    } else {
+        uint32_t pages = (uint32_t)((size + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+        for (uint32_t i = 0; i < pages; i++) {
+            uint64_t frame = pmm_alloc();
+            if (frame == 0) {
+                vmm_destroy_space(space);
+                irq_restore(fl);
+                return -1;
+            }
+            memset((void *)frame, 0, PMM_FRAME_SIZE);
+            uint64_t chunk = size - (uint64_t)i * PMM_FRAME_SIZE;
+            if (chunk > PMM_FRAME_SIZE)
+                chunk = PMM_FRAME_SIZE;
+            memcpy((void *)frame, b + (uint64_t)i * PMM_FRAME_SIZE, chunk);
+            vmm_map_in(space, USER_CODE_BASE + (uint64_t)i * PMM_FRAME_SIZE,
+                       frame, VMM_W | VMM_U);
+        }
+    }
+
+    /* stiva user proaspata */
+    for (uint32_t i = 0; i < USER_STACK_PAGES; i++) {
+        uint64_t frame = pmm_alloc();
+        if (frame == 0) {
+            vmm_destroy_space(space);
+            irq_restore(fl);
+            return -1;
+        }
+        memset((void *)frame, 0, PMM_FRAME_SIZE);
+        vmm_map_in(space, USER_STACK_TOP - (uint64_t)(i + 1) * PMM_FRAME_SIZE,
+                   frame, VMM_W | VMM_U | VMM_NX);
+    }
+
+    /* argumentele in varful stivei (prin adresa fizica, spatiul nu e in CR3) */
+    uint64_t args_va = USER_STACK_TOP - 256;
+    uint64_t top_page = vmm_translate_in(space, USER_STACK_TOP - PMM_FRAME_SIZE);
+    char *adst = (char *)(top_page + PMM_FRAME_SIZE - 256);
+    uint64_t alen = 0;
+    if (args)
+        for (; args[alen] && alen < 255; alen++)
+            adst[alen] = args[alen];
+    adst[alen] = '\0';
+
+    /* comutam pe noul spatiu (kernelul e partajat, deci stiva de kernel si
+     * codul raman valide) si eliberam spatiul vechi */
+    address_space_t old = tasks[current].space;
+    __asm__ volatile("mov %0, %%cr3" : : "r"((uint64_t)space) : "memory");
+    tasks[current].space = space;
+    vmm_destroy_space(old);
+
+    /* resetam cadrul la noul program (ring 3) */
+    memset(f, 0, sizeof(*f));
+    f->rip    = entry;
+    f->rdi    = args_va;
+    f->cs     = 0x1B;
+    f->rflags = 0x202;
+    f->rsp    = USER_STACK_TOP - 512;
+    f->ss     = 0x23;
+
+    tasks[current].mem_kb = STACK_SIZE / 1024 +
+                            (uint32_t)((size + 4095) / 4096) * 4 +
+                            USER_STACK_PAGES * 4;
+    tasks[current].disk_kb = (uint32_t)((size + 1023) / 1024);
+    { int i = 0; for (; name[i] && i < 23; i++) tasks[current].file[i] = name[i]; tasks[current].file[i] = '\0'; }
+    set_name(&tasks[current], name);
+
+    irq_restore(fl);
+    return 0;
+}
+
+/* wait(pid): non-blocant. -2 = pid invalid; -1 = copilul inca ruleaza (apelantul
+ * reincearca); altfel codul de iesire (0..255). Culege codul din exitlog dupa ce
+ * copilul a fost reciclat de scheduler. */
+int task_wait(int pid)
+{
+    if (pid < 0 || pid >= MAX_TASKS)
+        return -2;
+    uint64_t fl = irq_save();
+    int code;
+    if (tasks[pid].state != T_UNUSED) {
+        code = -1;                        /* inca exista un task in acel slot */
+    } else {
+        code = exitlog_take(pid);
+        if (code < 0)
+            code = 0;                     /* iesit, dar fara inregistrare */
+    }
+    irq_restore(fl);
+    return code;
 }
 
 /* Page fault din ring 3: incearca sa creasca stiva la cerere (demand paging).
@@ -409,6 +646,8 @@ static void reap(struct task *t)
     t->space = 0;
     for (uint64_t p = 0; p < STACK_PAGES; p++)
         pmm_free(t->stack_base + p * PMM_FRAME_SIZE);
+    /* retinem codul de iesire ca parintele sa-l poata culege prin wait() */
+    exitlog_put((int)(t - tasks), t->exit_code);
     t->state = T_UNUSED;
 }
 

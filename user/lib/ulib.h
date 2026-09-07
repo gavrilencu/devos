@@ -14,9 +14,16 @@ void print_num(int64_t v);
 void write_buf(const void *p, uint64_t len);   /* scrie exact len bytes */
 
 void uexit(void) __attribute__((noreturn));
+void uexit_code(int code) __attribute__((noreturn));   /* iesire cu cod */
 int64_t getpid(void);
+int64_t getppid(void);
 void sleep_ms(uint64_t ms);
 uint64_t ticks(void);
+
+/* Model de procese (Milestone 59). */
+int64_t fork(void);                          /* 0 in copil, pid-ul copilului in parinte, -1 esec */
+int     exec(const char *name, const char *args);  /* inlocuieste programul; intoarce -1 la esec */
+int     wait_pid(int64_t pid);               /* blocheaza pana iese copilul; intoarce codul (0..255) */
 
 /* codurile tastelor speciale livrate de kernel prin readc */
 #define KEY_UP    0x80

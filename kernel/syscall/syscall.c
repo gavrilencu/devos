@@ -50,6 +50,10 @@
 #define SYS_SSH_KEYGEN  33
 #define SYS_SSH_PUBKEY  34
 #define SYS_TERM_APPCUR 35
+#define SYS_FORK        36
+#define SYS_EXEC        37
+#define SYS_WAIT        38
+#define SYS_GETPPID     39
 
 #define FWRITE_MAX (512 * 1024)
 
@@ -108,11 +112,44 @@ uint64_t syscall_handler(struct int_frame *f)
     }
 
     case SYS_EXIT:
-        task_kill_current();
+        task_exit_current((int)(f->rdi & 0xFF));   /* codul de iesire in RDI */
         return sched_tick((uint64_t)f);    /* nu ne mai intoarcem in task */
 
     case SYS_GETPID:
         f->rax = (uint64_t)task_current_id();
+        return (uint64_t)f;
+
+    case SYS_GETPPID:
+        f->rax = (uint64_t)task_current_ppid();
+        return (uint64_t)f;
+
+    case SYS_FORK: {
+        int child = task_fork(f);          /* copilul primeste RAX=0 in cadrul lui */
+        f->rax = (uint64_t)(int64_t)child; /* parintele: pid-ul copilului sau -1 */
+        return (uint64_t)f;
+    }
+
+    case SYS_EXEC: {
+        char name[24], args[96];
+        if (copy_name(f->rdi, name) < 0 || copy_str(f->rsi, args, 96) < 0) {
+            f->rax = (uint64_t)-1;
+            return (uint64_t)f;
+        }
+        uint32_t size = 0;
+        void *data = fs_read_file(name, &size);
+        if (!data) {
+            f->rax = (uint64_t)-1;
+            return (uint64_t)f;
+        }
+        int rc = task_exec(f, name, data, size, args);
+        kfree(data);
+        if (rc < 0)                        /* esec: procesul vechi e intact */
+            f->rax = (uint64_t)-1;
+        return (uint64_t)f;                /* la succes, `f` e deja noul program */
+    }
+
+    case SYS_WAIT:
+        f->rax = (uint64_t)(int64_t)task_wait((int)f->rdi);
         return (uint64_t)f;
 
     case SYS_SLEEP:

@@ -77,16 +77,46 @@ void print_num(int64_t v)
     print(p);
 }
 
-void uexit(void)
+void uexit_code(int code)
 {
-    syscall2(1, 0, 0);
+    syscall2(1, (int64_t)(code & 0xFF), 0);
     for (;;)
         ;
+}
+
+void uexit(void)
+{
+    uexit_code(0);
 }
 
 int64_t getpid(void)
 {
     return syscall2(2, 0, 0);
+}
+
+int64_t getppid(void)
+{
+    return syscall2(39, 0, 0);
+}
+
+int64_t fork(void)
+{
+    return syscall2(36, 0, 0);
+}
+
+int exec(const char *name, const char *args)
+{
+    return (int)syscall2(37, (int64_t)name, (int64_t)(args ? args : ""));
+}
+
+/* wait blocant: syscall-ul e non-blocant (-1 = inca ruleaza), asa ca asteptam
+ * politicos (sleep + reincercare), ca la ping/dns. */
+int wait_pid(int64_t pid)
+{
+    int64_t r;
+    while ((r = syscall2(38, pid, 0)) == -1)
+        sleep_ms(10);
+    return (int)r;    /* -2 = pid invalid, altfel codul de iesire */
 }
 
 void sleep_ms(uint64_t ms)
@@ -401,6 +431,6 @@ extern int umain(const char *args);
 void _start(const char *args);
 void _start(const char *args)
 {
-    umain(args);
-    uexit();
+    /* valoarea intoarsa de umain devine codul de iesire al procesului */
+    uexit_code(umain(args));
 }

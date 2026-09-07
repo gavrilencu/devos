@@ -29,6 +29,10 @@ address_space_t vmm_create_space(void);
  * Nu se cheama niciodata pe spatiul aflat in CR3. */
 void vmm_destroy_space(address_space_t space);
 
+/* Copiaza intreg spatiul user din `src` in `dst`, cadru cu cadru, cu aceleasi
+ * permisiuni (pentru fork). Intoarce 0 la succes, -1 fara memorie. */
+int vmm_fork_user(address_space_t dst, address_space_t src);
+
 /* Mapeaza pagina virtuala `virt` la cadrul fizic `phys` (ambele aliniate
  * la 4 KiB). Intoarce 0 la succes, -1 daca nu mai sunt cadre pentru tabele. */
 int vmm_map_in(address_space_t space, uint64_t virt, uint64_t phys, uint64_t flags);

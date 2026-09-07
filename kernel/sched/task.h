@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 
+struct int_frame;   /* definit in interrupts.h — folosit de fork/exec */
+
 /* Multitasking preemptiv cu scheduler round-robin.
  * Comutarea de context se face pe stiva: stub-urile ISR salveaza toate
  * registrele, iar schedulerul doar schimba RSP-ul cu care se face iretq. */
@@ -31,7 +33,16 @@ int task_create_user(const char *name, const void *blob, uint64_t size,
 /* Variante apelabile din context de intrerupere/syscall: doar seteaza
  * starea; comutarea o face apelantul, intorcand sched_tick(). */
 void task_kill_current(void);
+void task_exit_current(int code);    /* ca task_kill_current, dar retine codul de iesire */
 void task_sleep_current(uint64_t ms);
+
+/* Model de procese (Milestone 59): fork/exec/wait + parinte/copil + coduri de
+ * iesire. `pid`-ul unui proces e indexul lui de slot (0..MAX_TASKS-1). */
+int task_fork(struct int_frame *f);          /* copil: pid catre parinte, 0 in copil, -1 esec */
+int task_exec(struct int_frame *f, const char *name,
+              const void *blob, uint64_t size, const char *args);  /* inlocuieste imaginea; -1 esec */
+int task_wait(int pid);                       /* >=0 cod iesire, -1 inca ruleaza, -2 pid invalid */
+int task_current_ppid(void);                  /* pid-ul parintelui */
 
 void task_yield(void);            /* cedeaza CPU-ul voluntar (int 48) */
 int task_alive(int id);           /* 1 daca slotul e ocupat de un task viu */

@@ -698,7 +698,34 @@ extensibil. Fiecare pas din roadmap e documentat mai jos pe masura ce e implemen
       - urmeaza (spre task-uri **user** pe toate nucleele): TSS per-nucleu (rsp0
         propriu la trecerea ring3→ring0), stare per-CPU pentru `current`, run-queue
         partajat cu balansare de incarcare, migrare de task-uri intre nuclee
-- [ ] Milestone 59-60: fork/exec/wait, threads
+- [x] **Milestone 59: Process model 2.0 — fork / exec / wait** (v0.62) — FAZA 4,
+      procese moderne:
+      - **`fork()`** (`kernel/arch/x86_64/paging/vmm.c` + `sched/task.c`): duplica
+        procesul curent — `vmm_fork_user()` copiaza intreg spatiul user (subtree-ul
+        `PML4[1]`), cadru cu cadru, cu aceleasi permisiuni (copie completa/eager, nu
+        copy-on-write); cadrul copilului = copia cadrului parintelui cu `RAX=0`, deci
+        in copil `fork()` intoarce **0**, iar in parinte **pid-ul copilului**
+      - **`exec(name, args)`**: inlocuieste imaginea procesului curent — construieste
+        un spatiu de adrese nou (ELF sau binar flat + stiva user proaspata), comuta
+        `CR3`, elibereaza spatiul vechi si reseteaza cadrul la noul punct de intrare;
+        **pid-ul si parintele se pastreaza** (exact ca in Unix)
+      - **`wait(pid)`** + **coduri de iesire**: `exit(code)` retine codul; cand
+        procesul e reciclat, codul e pastrat intr-un jurnal de iesiri; `wait()`
+        blocheaza parintele (politicos: sleep + reincercare) pana iese copilul si-i
+        intoarce codul (0..255). Valoarea intoarsa de `umain()` devine codul de iesire
+      - **relatii parinte/copil**: fiecare proces retine `parent` (pid-ul); `getpid()`
+        / `getppid()` le expun. Syscalls noi: `fork`=36, `exec`=37, `wait`=38,
+        `getppid`=39; wrappere in `user/lib/ulib.c`
+      - **VERIFICAT** vizual in terminal (`proctest`, `-smp 4` si 1 nucleu):
+        „parinte PID=3, PPID=2" → „am creat copilul PID=4" → copilul ruleaza concurent
+        („[copil] PID=4, PPID=3", 3 pasi) → „copilul a iesit cu codul 42"; iar
+        `proctest exec`: copilul (PID=4) isi inlocuieste imaginea cu programul `hi`
+        (acelasi PID=4, argumente pasate), care iese cu codul 7 — cules corect de
+        parinte prin `wait()`; fara regresie pe 1 nucleu
+      - nota onesta: **pid = index de slot** (0..7), fara numere de generatie inca
+        (o mica cursa daca slotul e refolosit inainte de `wait`); process groups /
+        sessions / variabile de mediu raman pentru un pas viitor (parte din M59)
+- [ ] Milestone 60: threads (TLS, thread IDs, mutex, condition variables)
 - [ ] Milestone 61-64: permisiuni, separare de privilegii, capabilities, secure boot
 - [ ] Milestone 65-69: VFS, filesystem modern, block layer, AHCI/SATA, NVMe
 - [ ] (roadmap complet in `task.txt`: hardware modern, GPU, desktop, retea 2.0,

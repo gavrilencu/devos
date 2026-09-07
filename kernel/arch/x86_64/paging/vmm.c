@@ -155,6 +155,51 @@ void vmm_destroy_space(address_space_t space)
     pmm_free((uint64_t)space);
 }
 
+/* Copiaza intreg spatiul user (subtree-ul PML4[1]) din `src` in `dst`, cadru
+ * cu cadru: pentru fiecare pagina user mapata aloca un cadru nou, ii copiaza
+ * continutul (toate cadrele fizice sunt identity-mapped) si o mapeaza in `dst`
+ * cu ACELEASI permisiuni (W/U/NX). Folosit de fork(). Copiere completa (eager),
+ * fara copy-on-write. Intoarce 0 la succes, -1 daca ramane fara memorie (caz in
+ * care apelantul distruge `dst`, eliberand ce s-a alocat pana atunci). */
+int vmm_fork_user(address_space_t dst, address_space_t src)
+{
+    uint64_t e1 = src[VMM_USER_SLOT];
+    if (!(e1 & PTE_P))
+        return 0;                       /* procesul nu are nimic user mapat */
+    uint64_t *pdpt = (uint64_t *)PTE_ADDR(e1);
+    for (int i = 0; i < 512; i++) {
+        if (!(pdpt[i] & PTE_P))
+            continue;
+        uint64_t *pd = (uint64_t *)PTE_ADDR(pdpt[i]);
+        for (int j = 0; j < 512; j++) {
+            if (!(pd[j] & PTE_P))
+                continue;
+            uint64_t *pt = (uint64_t *)PTE_ADDR(pd[j]);
+            for (int k = 0; k < 512; k++) {
+                uint64_t e = pt[k];
+                if (!(e & PTE_P))
+                    continue;
+                uint64_t va = ((uint64_t)VMM_USER_SLOT << 39) |
+                              ((uint64_t)i << 30) | ((uint64_t)j << 21) |
+                              ((uint64_t)k << 12);
+                uint64_t flags = 0;
+                if (e & PTE_W)  flags |= VMM_W;
+                if (e & PTE_U)  flags |= VMM_U;
+                if (e & PTE_NX) flags |= VMM_NX;
+                uint64_t nf = pmm_alloc();
+                if (nf == 0)
+                    return -1;
+                memcpy((void *)nf, (const void *)PTE_ADDR(e), PMM_FRAME_SIZE);
+                if (vmm_map_in(dst, va, nf, flags) < 0) {
+                    pmm_free(nf);
+                    return -1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 /* Activeaza bitul NXE din EFER (MSR 0xC0000080) ca bitul NX din PTE-uri sa
  * fie luat in seama. Paginile existente au NX=0 (executabile), deci e sigur. */
 static void enable_nxe(void)
