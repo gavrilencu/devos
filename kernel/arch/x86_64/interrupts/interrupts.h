@@ -14,4 +14,5 @@ typedef void (*irq_handler_t)(struct int_frame *f);
 
 void gdt_init(void);                          /* gdt.asm — GDT-ul kernelului */
 void idt_init(void);                          /* idt.c   — tabela de intreruperi */
+void idt_load(void);                          /* incarca IDT-ul pe nucleul curent */
 void irq_install(int irq, irq_handler_t h);   /* interrupts.c */

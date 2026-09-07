@@ -154,7 +154,9 @@ void kmain(void)
     __asm__ volatile("sti");
     kprintf("[ok] Intreruperi active: PIT, tastatura (IRQ1), mouse (IRQ12)\n");
 
-    smp_init();               /* Milestone 57: porneste nucleele secundare (AP) */
+    /* Milestone 57/58: porneste nucleele secundare + timer-ele LAPIC per-nucleu.
+     * Fiecare nucleu devine viu (idle sub propriul timer). */
+    smp_init();
 
     cpu_info_init();        /* masoara frecventa CPU (are nevoie de PIT + IF=1) */
     gui_sysinfo_gather();   /* strange specificatiile hardware (CPU/GPU/disc) */

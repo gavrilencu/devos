@@ -4,6 +4,8 @@
 #include "vga.h"
 #include "task.h"
 #include "syscall.h"
+#include "lapic.h"
+#include "smp.h"
 
 static const char *exc_name[32] = {
     "#DE impartire la zero", "#DB debug",              "NMI",
@@ -133,6 +135,14 @@ uint64_t isr_dispatch(struct int_frame *f)
 
     if (f->vector == 128)              /* syscall din ring 3 */
         return syscall_handler(f);
+
+    if (f->vector == 0x40) {           /* timer Local APIC (per-nucleu) */
+        smp_cpu_tick();                /* bataia acestui nucleu */
+        lapic_eoi();                   /* EOI catre Local APIC, NU catre PIC */
+        /* Pe un AP cu scheduler propriu, comuta la urmatorul task de kernel;
+         * pe BSP (fara scheduler AP) intoarce exact cadrul primit. */
+        return ap_sched_tick((uint64_t)f);
+    }
 
     return (uint64_t)f;
 }

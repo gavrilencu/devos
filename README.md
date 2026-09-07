@@ -642,6 +642,62 @@ extensibil. Fiecare pas din roadmap e documentat mai jos pe masura ce e implemen
       - urmeaza (M58+ / rescriere scheduler): TSS + timer LAPIC per-nucleu, stare
         per-CPU (task curent), context-switch multi-core, IPI, lock-uri fine peste
         subsisteme — ca task-urile sa ruleze efectiv pe toate nucleele
+- [x] **Timer Local APIC** (v0.59) — „timer APIC" (amanat de la M56), pas spre
+      tick de scheduler per-nucleu:
+      - LVT Timer + Initial Count + Divide Config; **calibrat fata de PIT** (numaram
+        tick-uri LAPIC intr-un interval PIT cunoscut) si pornit **periodic** pe
+        vectorul 0x40 (`apic/lapic.c`, stub nou in `isr.asm`, poarta in `idt.c`)
+      - handler-ul numara tick-urile + face EOI catre Local APIC (nu PIC)
+      - **VERIFICAT**: „timer LAPIC 100 Hz: 20 tick-uri in 200 ms" (exact); PIT-ul
+        ramane dedeocamdata driver-ul scheduler-ului (fara regresie)
+- [x] **Nuclee VII sub timer LAPIC propriu** (v0.60) — FAZA 3, substratul
+      scheduler-ului per-nucleu:
+      - dupa testul de spinlock, fiecare nucleu secundar (AP) nu mai ramane doar
+        „parcat" in `hlt`, ci devine **viu**: isi incarca **GDT-ul kernelului**
+        (`gdt_init` — selectorul 0x08 = cod 64-bit corect, altfel poarta de
+        intrerupere ar tripla-fault) si **IDT-ul partajat** (`idt_load`, functie
+        noua care reincarca `idtr` pe nucleul curent), apoi porneste **propriul
+        timer LAPIC** pe vectorul 0x40 si activeaza intreruperile (`sti`)
+      - la fiecare tick, nucleul executa cod de kernel — `smp_cpu_tick()`
+        incrementeaza o **bataie de inima per-nucleu** (`cpu_heartbeat[apic_id]`),
+        indexata pe APIC ID; handlerul face EOI catre Local APIC
+      - APurile ruleaza in **ring 0**, deci nu au nevoie de TSS/`ltr` (nicio
+        schimbare de privilegiu la intrerupere) — un pas mic si sigur inainte de
+        rescrierea completa a scheduler-ului multi-core
+      - **VERIFICAT** cu `-smp 4`: fiecare nucleu raporteaza „ruleaza: ~28-31
+        tick-uri de timer in 300 ms" (asteptat ~30 la 100 Hz) — dovada ca toate
+        nucleele executa cod declansat de propriul timer; testul de spinlock ramane
+        exact (200000), desktopul se randeaza normal; cu 1 nucleu: fara regresie
+      - urmeaza: stare per-CPU (task curent + TSS per-nucleu), run-queue cu lock-uri,
+        context-switch pe orice nucleu — ca task-urile user sa ruleze efectiv SMP
+- [x] **Milestone 58 (complet): SMP scheduler — task-uri pe toate nucleele** (v0.61)
+      — FAZA 3, coroana multi-core:
+      - fiecare nucleu secundar are acum **propria coada de task-uri** (run-queue
+        per-CPU) si le comuta **round-robin preemptiv** la fiecare tick al
+        **propriului timer LAPIC** — deci schedulerul ruleaza pe TOATE nucleele in
+        paralel (`CPU1→task, CPU2→task, CPU3→task`), nu doar pe BSP
+      - **comutare de context per-nucleu**: acelasi mecanism ca la BSP (un cadru de
+        intrerupere fals pe stiva fiecarui task; `iretq`-ul din stub-ul ISR il
+        porneste). Handlerul timer-ului (vector 0x40) intoarce acum cadrul
+        urmatorului task via `ap_sched_tick()` (`apic/smp.c`)
+      - **izolare de risc**: schedulerul BSP-ului (PIT + tabela globala `tasks[]`
+        din `sched/task.c`, care ruleaza GUI-ul/shell-urile/browser-ul) ramane
+        **neatins** — pe BSP `ap_sched_tick` intoarce exact cadrul primit. Task-urile
+        AP ruleaza in **ring 0** (fara TSS/schimbare de privilegiu) si ating doar
+        contoare per-CPU, deci nu ating starea de kernel nepartajata (consola/fb)
+      - **fara lock in tick**: fiecare nucleu atinge doar coada lui; publicarea unui
+        task nou (de pe BSP) e cu `__atomic_store RELEASE`, iar tick-ul o vede cu
+        `ACQUIRE` — deci nicio cursa intre `ap_sched_spawn` si comutare
+      - **VERIFICAT** cu `-smp 4`: pornim **2 task-uri de kernel pe fiecare** din cele
+        3 nuclee secundare; dupa ~500 ms fiecare nucleu raporteaza ambele task-uri cu
+        progres echilibrat (ex. „nucleul 2: worker-a=25252 worker-b=25242 iteratii")
+        → **6 task-uri ruleaza concurent pe 3 nuclee**, fiecare nucleu comutand intre
+        cele 2 ale lui; „scheduler multi-core activ: 3 nuclee secundare ruleaza cate
+        2 task-uri de kernel concurent"; spinlock ramane exact (200000), desktop
+        randat normal; cu 1 nucleu: fara regresie
+      - urmeaza (spre task-uri **user** pe toate nucleele): TSS per-nucleu (rsp0
+        propriu la trecerea ring3→ring0), stare per-CPU pentru `current`, run-queue
+        partajat cu balansare de incarcare, migrare de task-uri intre nuclee
 - [ ] Milestone 59-60: fork/exec/wait, threads
 - [ ] Milestone 61-64: permisiuni, separare de privilegii, capabilities, secure boot
 - [ ] Milestone 65-69: VFS, filesystem modern, block layer, AHCI/SATA, NVMe

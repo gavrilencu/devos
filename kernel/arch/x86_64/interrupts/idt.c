@@ -16,6 +16,7 @@ struct idt_entry {
 static struct idt_entry idt[256];
 
 extern uint64_t isr_stub_table[49];   /* din isr.asm */
+extern char isr64[];                  /* stub-ul timer-ului Local APIC */
 extern char isr128[];                 /* stub-ul de syscall */
 
 static void set_gate(int v, uint64_t handler, uint8_t flags)
@@ -29,18 +30,27 @@ static void set_gate(int v, uint64_t handler, uint8_t flags)
     idt[v].reserved = 0;
 }
 
-void idt_init(void)
+/* Incarca IDT-ul (partajat) in registrul IDTR al nucleului curent. Fiecare
+ * nucleu — inclusiv AP-urile la pornire — trebuie sa faca asta. */
+void idt_load(void)
 {
-    for (int i = 0; i < 49; i++)
-        set_gate(i, isr_stub_table[i], 0x8E);   /* present | DPL0 | int gate */
-
-    /* Syscall: DPL=3, ca ring 3 sa aiba voie sa faca "int 0x80". */
-    set_gate(128, (uint64_t)isr128, 0xEE);
-
     struct {
         uint16_t limit;
         uint64_t base;
     } __attribute__((packed)) idtr = { sizeof(idt) - 1, (uint64_t)idt };
 
     __asm__ volatile("lidt %0" : : "m"(idtr));
+}
+
+void idt_init(void)
+{
+    for (int i = 0; i < 49; i++)
+        set_gate(i, isr_stub_table[i], 0x8E);   /* present | DPL0 | int gate */
+
+    set_gate(0x40, (uint64_t)isr64, 0x8E);      /* timer Local APIC */
+
+    /* Syscall: DPL=3, ca ring 3 sa aiba voie sa faca "int 0x80". */
+    set_gate(128, (uint64_t)isr128, 0xEE);
+
+    idt_load();
 }

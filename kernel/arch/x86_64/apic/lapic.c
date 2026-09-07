@@ -1,6 +1,7 @@
 #include "lapic.h"
 #include "acpi.h"
 #include "vmm.h"
+#include "pit.h"
 
 #define LAPIC_ID    0x020    /* ID Register */
 #define LAPIC_EOI   0x0B0    /* End Of Interrupt */
@@ -65,3 +66,38 @@ void lapic_send_startup(uint32_t apic_id, uint8_t vector)
     lapic_write(LAPIC_ICRLO, ICR_STARTUP | vector);
     lapic_wait_icr();
 }
+
+/* --- Timer Local APIC (per-nucleu) --- */
+#define LVT_TIMER    0x320
+#define TIMER_INIT   0x380
+#define TIMER_CUR    0x390
+#define TIMER_DIV    0x3E0
+#define LVT_MASKED   0x10000
+#define LVT_PERIODIC 0x20000
+
+static volatile uint64_t timer_ticks;
+
+void lapic_timer_start(uint8_t vector, uint32_t hz)
+{
+    if (!lapic)
+        return;
+    lapic_write(TIMER_DIV, 0x3);            /* divizor 16 */
+    /* Calibrare: numaram tick-uri LAPIC intr-un interval PIT cunoscut. */
+    lapic_write(LVT_TIMER, LVT_MASKED);
+    uint64_t t = pit_ticks();
+    while (pit_ticks() == t)                /* aliniere la marginea unui tick */
+        __asm__ volatile("pause");
+    lapic_write(TIMER_INIT, 0xFFFFFFFF);
+    uint64_t s = pit_ticks();
+    while (pit_ticks() - s < 2)             /* 2 tick-uri PIT = 20 ms */
+        __asm__ volatile("pause");
+    uint32_t elapsed = 0xFFFFFFFFu - lapic_read(TIMER_CUR);
+    uint32_t count = (uint32_t)((uint64_t)elapsed * 50 / hz);   /* /s = elapsed*50 */
+    if (count == 0)
+        count = 1;
+    lapic_write(TIMER_INIT, count);
+    lapic_write(LVT_TIMER, vector | LVT_PERIODIC);
+}
+
+void lapic_timer_tick(void)      { timer_ticks++; }
+uint64_t lapic_timer_count(void) { return timer_ticks; }

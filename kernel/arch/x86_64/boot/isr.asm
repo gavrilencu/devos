@@ -34,6 +34,9 @@ isr%1:
 %assign i i+1
 %endrep
 
+; Vectorul 0x40 (64): timer Local APIC (per-nucleu, Milestone 58+).
+DEF_ISR 64
+
 ; Vectorul 128 (0x80): syscall — poarta lui din IDT are DPL=3,
 ; deci poate fi apelat cu "int 0x80" din ring 3.
 DEF_ISR 128
