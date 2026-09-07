@@ -630,8 +630,18 @@ extensibil. Fiecare pas din roadmap e documentat mai jos pe masura ce e implemen
         (halt); BSP-ul confirma cu timeout (nu se blocheaza daca un nucleu tace)
       - **VERIFICAT** cu `-smp 4`: „nucleul APIC ID 1/2/3 a pornit", „4 din 4 nuclee
         active"; cu 1 nucleu: „SMP inactiv", boot normal (fara regresie)
-- [ ] Milestone 58: Scheduler SMP — task-uri pe orice nucleu + spinlock-uri peste
-      PMM/kheap/scheduler/consola (tot kernelul devine concurent) + IPI
+- [x] **Milestone 58: SMP — spinlock-uri + paralelism dovedit** (v0.58) — FAZA 3:
+      - **spinlock** (`kernel/core/spinlock.h`): `spin_lock/unlock/trylock` cu operatii
+        atomice GCC (`lock xchg`), pattern test-and-test-and-set (fara plimbat cache)
+      - **test de paralelism REAL**: toate nucleele (BSP + AP) incrementeaza acelasi
+        contor sub spinlock; daca lock-ul e corect, rezultatul e **exact** — nicio
+        actualizare pierduta oricat s-ar bate nucleele pe memorie
+      - **VERIFICAT** cu `-smp 4`: „4 nuclee, 200000 incrementari partajate,
+        contor = 200000 (fara pierderi)" — dovada de excludere mutuala + coerenta
+        de cache intre nuclee; cu 1 nucleu: neutru, fara regresie
+      - urmeaza (M58+ / rescriere scheduler): TSS + timer LAPIC per-nucleu, stare
+        per-CPU (task curent), context-switch multi-core, IPI, lock-uri fine peste
+        subsisteme — ca task-urile sa ruleze efectiv pe toate nucleele
 - [ ] Milestone 59-60: fork/exec/wait, threads
 - [ ] Milestone 61-64: permisiuni, separare de privilegii, capabilities, secure boot
 - [ ] Milestone 65-69: VFS, filesystem modern, block layer, AHCI/SATA, NVMe
