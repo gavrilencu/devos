@@ -49,6 +49,9 @@ Write-Host "  ================================================================"
 Write-Host ""
 Write-Host "Pornesc MyOS ..."
 
+# -smp 4: PATRU nuclee de CPU (multi-core). DevOS le porneste pe toate (APIC +
+#   SMP), le da fiecare timer LAPIC propriu si ruleaza un scheduler per-nucleu -
+#   fara asta boot-ul ar spune "un singur nucleu". Schimba numarul cum vrei.
 # -vga std: VGA standard (VBE + interfata dispi Bochs: DevOS ruleaza Full HD
 #   1920x1080, comutabil din Setari). -full-screen: fereastra cat tot monitorul,
 #   ca sa se vada si taskbar-ul de jos (iesi cu Ctrl+Alt+F, elibereaza mouse-ul
@@ -56,7 +59,7 @@ Write-Host "Pornesc MyOS ..."
 # -netdev user + rtl8139: placa de retea (user-mode/SLIRP): MyOS primeste
 #   10.0.2.15, gateway 10.0.2.2. Portul 2323 din Windows -> 23 (telnet) in MyOS.
 $imgArg = 'file=' + $img + ',format=raw'
-& $qemu -m 256M -vga std -drive $imgArg `
+& $qemu -m 256M -smp 4 -vga std -drive $imgArg `
     -display gtk,zoom-to-fit=on -full-screen `
     -netdev user,id=net0,hostfwd=tcp::2323-:23 -device rtl8139,netdev=net0 `
     -serial stdio
