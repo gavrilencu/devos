@@ -523,6 +523,121 @@ reboot — până la următorul `wsl make`, care regenerează imaginea.
       - syscall nou 35 (`term_appcursor`) expune starea DECCKM a terminalului
       - **VERIFICAT la nivel de octeti** prin SSH: sus=`\eOA`, F1=`\eOP`, F5=`\e[15~`;
         plus box-drawing mc (UTF-8 + charset DEC) randate corect
+- [x] Milestone 50: **Pagina Specificatii (info hardware) in Setari** (v0.50):
+      - tab nou **Specificatii** (Alt+F8 → tasta `s`) cu detalii despre fiecare
+        componenta a calculatorului:
+      - **Procesor**: brand string via **CPUID** (0x80000002-4), vendor, nr. de
+        nuclee logice, instructiuni (SSE/SSE2/AVX...), **frecventa masurata** (TSC
+        vs. PIT la boot) — `kernel/cpuinfo.c`
+      - **RAM**: total + liber (din PMM)
+      - **Placa video**: dispozitiv PCI de clasa display (0x03) + rezolutie/bpp
+      - **Disc**: model + capacitate via comanda ATA **IDENTIFY** (`ata_identify`)
+      - datele hardware statice se string o data la boot (context de task, IF=1) ca
+        sa nu se faca polling ATA/PCI din context IRQ
+      - **VERIFICAT vizual**: CPU 3786 MHz, 255 MiB RAM, QEMU stdvga 1920x1080,
+        QEMU HARDDISK 24 MiB
+- [x] Milestone 51: **Pagina Retea in Setari** (v0.51):
+      - tab nou **Retea** (Alt+F8 → tasta `r`): stare placa (RTL8139), **adresa IP**,
+        **MAC**, **gateway**, **server DNS**
+      - butoane **Test ping gateway** (`p`) si **Test DNS example.com** (`n`) —
+        rezultatul (RTT / IP rezolvat) soseste asincron (IRQ placa) si se afiseaza
+        live prin callback-ul rapid (fara blocare in context IRQ)
+      - **VERIFICAT vizual**: ping gateway 10.0.2.2 → raspuns, DNS example.com →
+        rezolvat
+- [x] Milestone 52: **Pagina Data & Ora (ceas + calendar) in Setari** (v0.52):
+      - tab nou **Data / Ora** (Alt+F8 → tasta `o`) cu **ceas analog** desenat cu
+        ace (ora/minut/secunda) + marcaje, folosind un tabel sin/cos intreg (fara
+        floating point), care **bate in fiecare secunda**
+      - ora digitala mare, data completa cu **ziua saptamanii** (algoritmul lui
+        Sakamoto) in romana
+      - **calendar lunar** cu ziua curenta evidentiata si weekendul colorat
+        (din RTC: `cmos()` registrele 0x00-0x09, BCD)
+      - **VERIFICAT vizual**: „Luni, 7 Septembrie 2026", calendar corect, ceas viu
+
+### Roadmap 2026 → OS modern (din `task.txt`)
+
+De la un OS demonstrativ bogat spre unul modern, robust, multi-core, securizat si
+extensibil. Fiecare pas din roadmap e documentat mai jos pe masura ce e implementat.
+
+- [x] **Milestone 53: Arhitectura kernelului** (v0.53) — FAZA 1, Stabilizare:
+      - **reorganizarea sursei in subsisteme** clare: `kernel/arch/x86_64/{boot,
+        cpu,paging,interrupts}`, `kernel/{mm,sched,fs,net,ipc,drivers,security,
+        syscall,gui,core}` (39 .c + 38 .h mutate); codul specific arhitecturii e
+        separat de codul generic, iar driverele de kernel
+      - Makefile: `-I` pentru toate subdirectoarele + `vpath` (astfel
+        `#include "foo.h"` se rezolva oriunde — numele sunt unice); nicio linie de
+        `#include` nu s-a schimbat
+      - **`kernel_panic()`** centralizat (opreste intreruperile, afiseaza mesajul,
+        blocheaza) — `kernel/core/klog.c`
+      - **niveluri de logging** ERROR/WARN/INFO/DEBUG cu subsistem: `klog()` +
+        macrourile `KERR/KWARN/KINFO/KDBG` (prag reglabil `klog_set_level`);
+        `vkprintf` expus din kprintf pentru formatare cu `va_list`
+      - **versiune + build ID** in `kernel/core/version.h` (`KERNEL_VERSION`,
+        `KERNEL_ARCH`) + `KERNEL_BUILD_ID` injectat de Makefile (data/ora UTC);
+        folosit in banner-ul de boot, in `KINFO` si in Setari→Despre (sursa unica)
+      - **VERIFICAT**: build curat din noul arbore, boot OK, banner
+        „DevOS v0.53 (x86_64) build 20260907.1755", linia `[INFO ] kernel: ...`,
+        desktop randat
+- [x] **Milestone 54: Virtual Memory 2.0** (v0.54) — FAZA 2, Memory Management:
+      - **protectie de memorie W^X + NX**: activat `EFER.NXE`, adaugat bitul `PTE_NX`
+        si flag-ul `VMM_NX`; loaderul ELF mapeaza fiecare segment dupa permisiunile
+        lui (`p_flags`): **cod = R-X** (executabil, ne-scriabil), **date/stiva =
+        RW + NX** (ne-executabile) — nicio pagina nu e simultan scriabila si
+        executabila
+      - **page fault handler 2.0**: decodeaza codul de eroare (pagina lipsa vs
+        protectie, citire/scriere, ring 0/3, aducere instructiune) intr-un mesaj clar
+      - **demand paging + crestere de stiva**: stiva user porneste cu 4 pagini si
+        **creste la cerere** (pe #PF de pagina lipsa) pana la 2 MiB — paginile se
+        aloca abia cand sunt atinse
+      - **guard page**: sub limita stivei e o zona nemapata; un **stack overflow** o
+        loveste, e detectat („STACK OVERFLOW") si **doar procesul e oprit**, sistemul
+        merge mai departe (izolare)
+      - **VERIFICAT**: programele ELF ruleaza sub W^X; `stacktest` creste stiva la
+        ~1.9 MiB apoi loveste garda → oprit curat, iar `mem` raspunde dupa (sistem viu)
+      - deferit (parte din M54, va urma): `mmap`/`munmap`, lista VMA formala,
+        memorie partajata, fisiere mapate in memorie
+- [x] **Milestone 55: Allocatoare** (v0.55) — FAZA 2:
+      - **allocator slab / object cache** (`kernel/mm/slab.c`): cache-uri de obiecte
+        de dimensiune fixa, taiate din cadre fizice intr-o free-list intrusiva —
+        alloc/free O(1), fara fragmentare (pt. structuri kernel alocate des); API
+        `slab_cache_create/slab_alloc/slab_free` + statistici; self-test la boot
+      - **PMM next-fit (rover)**: `pmm_alloc` cauta de la ultimul cadru alocat, nu
+        de la 0 → O(1) amortizat in loc de O(n)
+      - **meminfo**: raport la boot (PMM total/liber, kheap folosit/liber, slab)
+      - **VERIFICAT**: `slab: selftest 200 obiecte x 64B in 4 slaburi, integritate OK`
+      - nota onesta: **buddy allocator fizic** amanat — metadata per-cadru nu incape
+        in `.bss`-ul din zona joasa (< 640 KiB, langa gaura BIOS/VGA); vine dupa
+        mutarea kernelului in half-ul superior (cleanup de layout de memorie)
+- [x] **Milestone 56: APIC** (v0.56) — FAZA 3, spre multi-core:
+      - **ACPI**: gaseste RSDP (scan EBDA + 0xE0000-0xFFFFF, checksum), urmareste
+        RSDT/XSDT, gaseste tabela **MADT** („APIC") — `kernel/arch/x86_64/apic/acpi.c`
+      - **MADT**: enumereaza **nucleele CPU** (Local APIC, doar cele activate),
+        **I/O APIC**-ul si adresa Local APIC; mapeaza defensiv paginile tabelelor
+      - **Local APIC**: mapeaza MMIO-ul (0xFEE00000), il **activeaza** (SVR bit 8),
+        citeste APIC ID-ul nucleului de boot — `apic/lapic.c`
+      - **VERIFICAT** cu `-smp 4`: „4 nucleu(e) CPU, Local APIC @ 0xfee00000,
+        I/O APIC @ 0xfec00000", „Local APIC activat, APIC ID 0"
+      - deocamdata intreruperile raman pe **PIC-ul legacy** pentru nucleul de boot;
+        rutarea I/O APIC + timer-ul APIC per-nucleu vin la M57 (cand pornesc nucleele)
+- [x] **Milestone 57: SMP — pornirea nucleelor** (v0.57) — FAZA 3, multi-core:
+      - **trampolina AP** (`apic/ap_trampoline.asm`): un nucleu secundar porneste in
+        **real mode** la 0x8000 si e dus prin protected mode → **long mode**,
+        incarcand ACELEASI tabele de paginare ca ale kernelului (CR3 pasat de BSP);
+        binarul flat e inglobat in kernel prin `objcopy`
+      - **INIT-SIPI-SIPI** prin Local APIC (registrul ICR) pentru fiecare nucleu;
+        stiva proprie per nucleu, functie de intrare `ap_entry` (`apic/smp.c`)
+      - fiecare nucleu isi activeaza Local APIC-ul, semnaleaza BSP-ul si e **parcat**
+        (halt); BSP-ul confirma cu timeout (nu se blocheaza daca un nucleu tace)
+      - **VERIFICAT** cu `-smp 4`: „nucleul APIC ID 1/2/3 a pornit", „4 din 4 nuclee
+        active"; cu 1 nucleu: „SMP inactiv", boot normal (fara regresie)
+- [ ] Milestone 58: Scheduler SMP — task-uri pe orice nucleu + spinlock-uri peste
+      PMM/kheap/scheduler/consola (tot kernelul devine concurent) + IPI
+- [ ] Milestone 59-60: fork/exec/wait, threads
+- [ ] Milestone 61-64: permisiuni, separare de privilegii, capabilities, secure boot
+- [ ] Milestone 65-69: VFS, filesystem modern, block layer, AHCI/SATA, NVMe
+- [ ] (roadmap complet in `task.txt`: hardware modern, GPU, desktop, retea 2.0,
+      browser 2.0, SDK, servicii, izolare, testare, debugging, performanta → DevOS 1.0)
+
 - [ ] SSH: verificarea cheii gazdei (known_hosts) + import de chei OpenSSH existente
 - [ ] Font AA si pentru continutul browserului, tabele, mai mult CSS, JPEG
 - [ ] SSH: schimb de chei Diffie-Hellman + cifru, peste TCP

@@ -2,9 +2,21 @@
 
 BUILD := build
 
+# Milestone 53: kernelul e organizat in subsisteme (arch/mm/sched/fs/net/...).
+# Toate subdirectoarele intra in calea de includere, iar `#include "foo.h"`
+# se rezolva oriunde ar fi (numele de fisiere sunt unice). vpath spune lui make
+# unde sa gaseasca sursele pentru regulile generice de compilare.
+KDIRS := $(shell find kernel -type d)
+vpath %.c $(KDIRS)
+vpath %.asm $(KDIRS)
+
+# ID de build (data/ora UTC) injectat in kernel prin version.h.
+BUILD_ID := $(shell date -u +%Y%m%d.%H%M)
+
 CFLAGS := -m64 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
           -fno-asynchronous-unwind-tables -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-          -O2 -Wall -Wextra
+          -O2 -Wall -Wextra $(addprefix -I,$(KDIRS)) \
+          -DKERNEL_BUILD_ID=\"$(BUILD_ID)\"
 
 # js.c foloseste double (numerele JS) -> are nevoie de SSE. Doar firul
 # browserului ruleaza JS, iar restul kernelului e -mno-sse, deci registrele
@@ -21,7 +33,9 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/gdt.o $(BUILD)/isr.o \
          $(BUILD)/mouse.o $(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/netstack.o \
          $(BUILD)/tcp.o $(BUILD)/browser.o $(BUILD)/sha256.o $(BUILD)/aes.o \
          $(BUILD)/x25519.o $(BUILD)/tls.o $(BUILD)/js.o $(BUILD)/inflate.o \
-         $(BUILD)/png.o $(BUILD)/ssh.o $(BUILD)/ed25519.o $(BUILD)/cpuinfo.o
+         $(BUILD)/png.o $(BUILD)/ssh.o $(BUILD)/ed25519.o $(BUILD)/cpuinfo.o \
+         $(BUILD)/klog.o $(BUILD)/slab.o $(BUILD)/acpi.o $(BUILD)/lapic.o \
+         $(BUILD)/smp.o $(BUILD)/ap_trampoline.o
 
 # Limite impuse de lantul de boot: stage1 citeste 192 de sectoare
 # (8 pentru stage2 + 184 pentru kernel).
@@ -42,8 +56,17 @@ $(BUILD)/stage2.bin: boot/stage2.asm | $(BUILD)
 		echo "EROARE: stage2 are $$sz bytes, peste limita de $(STAGE2_MAX)"; exit 1; fi
 	truncate -s $(STAGE2_MAX) $@
 
-$(BUILD)/%.o: kernel/%.asm | $(BUILD)
+$(BUILD)/%.o: %.asm | $(BUILD)
 	nasm -f elf64 $< -o $@
+
+# Trampolina AP: binar FLAT (org 0x8000) inglobat in kernel ca obiect prin
+# objcopy (simbolurile _binary_ap_trampoline_bin_start/_end). Reguli explicite
+# ca sa nu fie prinsa de regula generica %.o: %.asm (care ar da elf64).
+$(BUILD)/ap_trampoline.bin: ap_trampoline.asm | $(BUILD)
+	nasm -f bin $< -o $@
+$(BUILD)/ap_trampoline.o: $(BUILD)/ap_trampoline.bin
+	cd $(BUILD) && objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+		ap_trampoline.bin ap_trampoline.o
 
 # Programele user: binare flat, livrate prin sistemul de fisiere MyFS.
 $(BUILD)/hello.bin: user/hello.asm | $(BUILD)
@@ -59,7 +82,7 @@ $(BUILD)/guess.bin: user/guess.asm | $(BUILD)
 # 0x8000000000 — kernelul le incarca prin loaderul ELF.
 # -mcmodel=large: adresa de baza nu incape in relocari pe 32 de biti.
 UCFLAGS := $(CFLAGS) -mcmodel=large
-UPROGS  := ush calc edit basic show upper lines nslookup telnet fetch ssh sshkey
+UPROGS  := ush calc edit basic show upper lines nslookup telnet fetch ssh sshkey stacktest
 
 $(BUILD)/ulib.o: user/lib/ulib.c user/lib/ulib.h | $(BUILD)
 	gcc $(UCFLAGS) -c $< -o $@
@@ -99,17 +122,18 @@ $(BUILD)/fs.img: $(BUILD)/mkfs $(UELFS) $(BUILD)/hello.bin \
                  fs/docs-bun-venit.txt fs/docs-idei.txt fs/sys-info.txt
 	$(BUILD)/mkfs $@ $(FS_FILES)
 
-$(BUILD)/%.o: kernel/%.c | $(BUILD)
+$(BUILD)/%.o: %.c | $(BUILD)
 	gcc $(CFLAGS) -c $< -o $@
 
-# js.o compilat cu SSE (double)
-$(BUILD)/js.o: kernel/js.c kernel/js.h kernel/js_lib.h | $(BUILD)
+# js.o compilat cu SSE (double). Dependenta de headere vine din regula $(KOBJS).
+$(BUILD)/js.o: js.c | $(BUILD)
 	gcc $(CFLAGS_SSE) -c $< -o $@
 
-$(KOBJS): $(wildcard kernel/*.h)
+$(KOBJS): $(shell find kernel -name '*.h')
 
-$(BUILD)/kernel.elf: $(KOBJS) kernel/linker.ld
-	ld -T kernel/linker.ld -o $@ $(KOBJS)
+LINKER_LD := kernel/arch/x86_64/boot/linker.ld
+$(BUILD)/kernel.elf: $(KOBJS) $(LINKER_LD)
+	ld -T $(LINKER_LD) -o $@ $(KOBJS)
 
 $(BUILD)/kernel.bin: $(BUILD)/kernel.elf
 	objcopy -O binary $< $@

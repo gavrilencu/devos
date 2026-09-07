@@ -5,6 +5,11 @@ ECRAN: DevOS ruleaza Full HD 1920x1080 (driver video propriu, prin
 interfata VBE dispi). Din meniul Start -> Setari -> Display poti schimba
 rezolutia la cald (1920x1080 / 1280x720 / 1024x768) sau cu tastele 1/2/3.
 
+SETARI (Alt+F8): tab-uri Display, Despre, Specificatii (tasta 's'), Retea
+(tasta 'r') si Data/Ora (tasta 'o'). Specificatii arata procesorul, RAM,
+placa video si discul. Retea arata IP/MAC/gateway/DNS + test ping (P) /
+DNS (N). Data/Ora are ceas analog+digital si calendar lunar.
+
 MENIUL START: apasa butonul DevOS din stanga-jos SAU tasta Windows (Super).
 De acolo pornesti Terminal, Explorer, Editor, Task Manager, Browser, Setari
 si poti da Repornire sau Oprire. FERESTRE: butonul verde = maximizeaza

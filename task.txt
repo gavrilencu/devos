@@ -1,0 +1,688 @@
+Da. La nivelul la care a ajuns DevOS, eu nu aș mai continua cu „încă o aplicație”. Aș schimba obiectivul: dintr-un OS demonstrativ foarte bogat într-un OS modern, robust, multitasking, multi-core, securizat și extensibil.
+
+Mai jos este roadmap-ul pe care l-aș urma, în ordinea priorității.
+
+🚀 DevOS — Roadmap 2026 → OS modern
+FAZA 1 — Stabilizare și arhitectură
+Milestone 53 — Kernel architecture
+
+Înainte de funcții noi:
+
+separă arch/x86_64/ de codul generic al kernelului;
+separă driverele de kernel;
+introdu un sistem de init;
+introdu subsisteme clare: mm, sched, fs, net, drivers, ipc;
+elimină dependențele globale inutile;
+introdu kernel_panic() centralizat;
+adaugă niveluri de logging:
+ERROR
+WARN
+INFO
+DEBUG;
+adaugă versiune/build ID pentru kernel.
+
+Structura țintă:
+
+kernel/
+├── arch/
+│   └── x86_64/
+│       ├── boot/
+│       ├── cpu/
+│       ├── apic/
+│       ├── paging/
+│       └── interrupts/
+│
+├── mm/
+├── sched/
+├── fs/
+├── net/
+├── ipc/
+├── drivers/
+├── security/
+├── syscall/
+└── kernel/
+🧠 FAZA 2 — Memory Management profesionist
+Milestone 54 — Virtual Memory 2.0
+
+Ai deja PMM + VMM. Acum:
+
+demand paging;
+page fault handling;
+guard pages;
+stack growth;
+memory regions/VMA;
+mmap;
+munmap;
+memory protection:
+R
+W
+X;
+kernel/user page permissions;
+shared memory;
+memory mapped files.
+
+Ținta:
+
+Process
+│
+├── code       RX
+├── rodata     R
+├── data       RW
+├── heap       RW
+├── mmap       RW
+├── stack      RW
+└── guard      NO ACCESS
+Milestone 55 — Allocatoare
+
+Introdu mai multe allocatoare:
+
+Physical:
+buddy allocator
+
+Kernel:
+slab/slub-like allocator
+
+Small objects:
+object caches
+
+Și instrumente:
+
+meminfo
+heapinfo
+vmmap <pid>
+⚡ FAZA 3 — MULTICORE
+
+Asta este probabil cel mai important upgrade tehnic.
+
+Milestone 56 — APIC
+CPUID;
+ACPI;
+MADT;
+Local APIC;
+I/O APIC;
+timer APIC;
+IRQ routing.
+Milestone 57 — SMP
+
+Pornește toate nucleele:
+
+CPU 0 ── scheduler
+CPU 1 ── scheduler
+CPU 2 ── scheduler
+CPU 3 ── scheduler
+
+Apoi:
+
+per-CPU structures;
+spinlocks;
+mutex;
+semaphores;
+atomic operations;
+inter-processor interrupts.
+Milestone 58 — SMP scheduler
+
+Schedulerul trebuie să poată:
+
+CPU0 → process A
+CPU1 → process B
+CPU2 → process C
+CPU3 → process D
+
+și eventual load balancing.
+
+🧵 FAZA 4 — Procese moderne
+Milestone 59 — Process model 2.0
+
+Adaugă:
+
+fork;
+exec;
+wait;
+kill;
+process groups;
+sessions;
+parent/child relationships;
+exit codes;
+environment variables.
+
+De exemplu:
+
+PID 1 init
+ ├── PID 20 ush
+ │    ├── PID 21 calc
+ │    └── PID 22 browser
+ └── PID 30 service
+Milestone 60 — Threads
+
+Adaugă:
+
+process
+ ├── thread 1
+ ├── thread 2
+ └── thread 3
+
+cu:
+
+TLS;
+thread IDs;
+mutex;
+condition variables;
+thread-local storage.
+🔐 FAZA 5 — SECURITY
+
+Aici DevOS începe să devină un OS serios.
+
+Milestone 61 — Permissions
+
+Implementare:
+
+user
+group
+permissions
+
+și:
+
+rwx
+rwx
+rwx
+
+pentru fișiere.
+
+Milestone 62 — Privilege separation
+
+Separă clar:
+
+Ring 0
+   │
+   │ syscall
+   ↓
+Ring 3
+
+și mai multe niveluri logice:
+
+kernel
+system services
+user applications
+Milestone 63 — Capability/security model
+
+În loc ca orice proces să poată face orice:
+
+Browser
+ ├── network capability
+ ├── filesystem capability
+ └── GUI capability
+
+dar nu:
+
+raw_disk
+kernel_memory
+Milestone 64 — Secure boot chain
+
+Mai târziu:
+
+UEFI
+ ↓
+signed bootloader
+ ↓
+verified kernel
+ ↓
+verified modules
+💾 FAZA 6 — STORAGE SERIOS
+
+MyFS este foarte bun pentru experimentare, dar pentru un OS puternic trebuie evoluat.
+
+Milestone 65 — VFS
+
+Introdu:
+
+VFS
+ ├── MyFS
+ ├── FAT32
+ └── future FS
+
+Astfel aplicațiile nu cunosc filesystem-ul concret.
+
+Milestone 66 — Filesystem modern
+
+Poți transforma MyFS într-un filesystem mai serios cu:
+
+directoare reale;
+inode-uri;
+journaling;
+metadata;
+timestamps;
+permissions;
+symlink;
+hardlink;
+crash recovery.
+Milestone 67 — Block layer
+Application
+ ↓
+VFS
+ ↓
+Filesystem
+ ↓
+Block layer
+ ↓
+ATA/AHCI/NVMe
+Milestone 68 — AHCI + SATA
+
+Apoi:
+
+Milestone 69 — NVMe
+
+Asta ar permite DevOS să lucreze cu hardware modern.
+
+🖥️ FAZA 7 — HARDWARE MODERN
+
+În prezent ești foarte orientat spre QEMU. Următorul obiectiv trebuie să fie:
+
+DevOS să pornească pe hardware real.
+
+Milestone 70 — ACPI
+RSDP;
+RSDT/XSDT;
+MADT;
+HPET;
+power management.
+Milestone 71 — PCIe
+
+Ai PCI. Extinde la:
+
+PCIe;
+MSI;
+MSI-X;
+BAR;
+device discovery.
+Milestone 72 — USB
+
+Ordinea:
+
+USB controller
+ ↓
+UHCI/OHCI/EHCI
+ ↓
+xHCI
+ ↓
+USB keyboard
+USB mouse
+USB storage
+Milestone 73 — HID
+
+Mouse și tastatură USB.
+
+Milestone 74 — Audio
+
+Poți implementa ulterior:
+
+HDA
+ ↓
+audio subsystem
+ ↓
+DevOS Audio API
+🎮 FAZA 8 — GPU
+
+Aici este unul dintre cele mai dificile obiective.
+
+Milestone 75 — Graphics abstraction
+DevOS Graphics API
+        │
+ ┌──────┼──────┐
+ │      │      │
+VBE    QEMU    GPU
+Milestone 76 — GPU acceleration
+
+În timp:
+
+command buffers;
+GPU memory;
+hardware acceleration;
+2D acceleration;
+eventual 3D.
+
+Nu aș începe direct cu NVIDIA/AMD. Fă mai întâi o abstracție bună.
+
+🪟 FAZA 9 — DESKTOP MODERN
+
+Aici poți transforma GUI-ul actual într-un adevărat desktop environment.
+
+Milestone 77 — Compositor
+Application
+    ↓
+Window
+    ↓
+Compositor
+    ↓
+Framebuffer/GPU
+
+În loc ca fiecare aplicație să deseneze direct pe framebuffer.
+
+Milestone 78 — GUI toolkit
+
+Creează:
+
+DevUI
+
+cu:
+
+Window;
+Button;
+TextBox;
+List;
+Tree;
+Menu;
+Dialog;
+Scrollbar;
+Table;
+Tab;
+Canvas.
+
+Atunci aplicațiile tale nu mai trebuie să deseneze manual fiecare pixel.
+
+Milestone 79 — Desktop shell
+DevOS Desktop
+├── Start
+├── Taskbar
+├── Notifications
+├── Search
+├── Settings
+├── File Manager
+└── Desktop
+🌐 FAZA 10 — NETWORKING 2.0
+
+Ai deja TCP/IP/DNS/HTTP/TLS. Acum:
+
+Milestone 80
+DHCP;
+IPv6;
+ICMPv6;
+UDP;
+TCP congestion control;
+sockets API;
+routing table;
+firewall.
+Milestone 81 — Network services
+/dev/net
+
+și API:
+
+socket()
+bind()
+listen()
+accept()
+connect()
+send()
+recv()
+close()
+
+Asta îți permite aplicațiilor user să folosească networking fără syscall-uri specializate pentru fiecare funcție.
+
+🌍 FAZA 11 — BROWSER 2.0
+
+Browserul tău este deja extraordinar pentru un proiect homemade.
+
+Acum:
+
+Milestone 82
+HTTP/1.1 complet;
+persistent connections;
+chunked transfer;
+gzip;
+Brotli eventual;
+cache;
+cookies persistente;
+JPEG;
+SVG;
+CSS box model.
+Milestone 83
+
+JavaScript:
+
+garbage collector;
+prototype chain;
+exceptions;
+modules;
+Date;
+RegExp;
+JSON;
+promises;
+async/await.
+Milestone 84
+
+DOM:
+
+DOM
+ ↓
+Style
+ ↓
+Layout
+ ↓
+Paint
+ ↓
+Compositor
+
+Asta poate deveni propriul tău mic browser engine.
+
+🛠️ FAZA 12 — DEVOS SDK
+
+Aș considera asta obligatoriu dacă numele este Developer OS.
+
+Milestone 85
+
+Compiler/toolchain:
+
+devcc
+devld
+devasm
+devmake
+Milestone 86
+
+Bibliotecă standard:
+
+libc
+libm
+libpthread
+libsocket
+libgui
+Milestone 87
+
+Package manager:
+
+devpkg install vim
+devpkg install python
+devpkg update
+devpkg remove app
+📦 FAZA 13 — SERVICES
+
+DevOS ar trebui să aibă servicii pornite de PID 1:
+
+init
+├── devlogd
+├── netd
+├── sshd
+├── gui-server
+├── devfs
+└── package-manager
+
+Apoi:
+
+service ssh start
+service ssh stop
+service ssh status
+🐳 FAZA 14 — IZOLARE
+
+După ce ai procese și security:
+
+Milestone 88
+
+Implementare de:
+
+sandbox;
+namespaces;
+resource limits;
+process isolation;
+filesystem isolation;
+network isolation.
+
+Poți ajunge la ceva conceptual precum:
+
+devsandbox browser
+
+Browserul nu poate accesa arbitrar filesystem-ul.
+
+🧪 FAZA 15 — TESTING
+
+Aici foarte multe proiecte OS eșuează.
+
+Construiește:
+
+tests/
+├── memory/
+├── scheduler/
+├── filesystem/
+├── tcp/
+├── tls/
+├── ssh/
+├── javascript/
+└── gui/
+
+și:
+
+make test
+
+plus teste automate pornite în QEMU.
+
+🐞 FAZA 16 — DEBUGGING PROFESIONIST
+
+Adaugă:
+
+Kernel debugger
+kdb
+
+cu:
+
+bt
+regs
+mem
+tasks
+vmmap
+info cpu
+info irq
+
+și suport GDB remote.
+
+Foarte important:
+
+panic
+ ↓
+register dump
+ ↓
+stack trace
+ ↓
+symbol names
+ ↓
+source location
+⚡ FAZA 17 — PERFORMANCE
+
+După ce toate funcționează:
+
+profiling;
+scheduler benchmarks;
+memory benchmarks;
+syscall benchmarks;
+filesystem benchmarks;
+network benchmarks;
+browser benchmarks;
+GUI FPS;
+boot time.
+
+Și un benchmark:
+
+DevOS Performance
+
+CPU:       3786 MHz
+RAM:       255 MB
+Boot:      1.42 s
+Scheduler: ...
+Syscall:   ... ns
+Disk:      ... MB/s
+Network:   ... Mb/s
+GUI:       60 FPS
+🏗️ Ordinea EXACTĂ pe care aș folosi-o
+
+Dacă vrei să-l faci extrem de puternic, nu încerca toate simultan.
+
+Aș merge:
+
+53  Kernel architecture
+54  Virtual Memory 2.0
+55  Allocators
+56  APIC
+57  SMP
+58  SMP Scheduler
+59  Process model
+60  Threads
+61  Permissions
+62  Privilege separation
+63  Capabilities
+64  Secure boot
+65  VFS
+66  Filesystem 2.0
+67  Block layer
+68  AHCI
+69  NVMe
+70  ACPI
+71  PCIe/MSI
+72  USB
+73  HID
+74  Audio
+75  Graphics abstraction
+76  GPU acceleration
+77  Compositor
+78  DevUI
+79  Desktop Shell
+80  Network 2.0
+81  Network services
+82  Browser 2.0
+83  JavaScript 2.0
+84  DOM/Layout 2.0
+85  DevOS SDK
+86  libc
+87  Package manager
+88  Services
+89  Sandboxing
+90  Automated testing
+91  Kernel debugger
+92  Profiling
+93  Optimization
+94  Hardware compatibility
+95  DevOS 1.0
+🎯 Iar ținta finală
+
+Eu aș defini DevOS 1.0 astfel:
+
+                         DEVOS 1.0
+                            │
+       ┌────────────────────┼────────────────────┐
+       │                    │                    │
+     KERNEL               DESKTOP              APPS
+       │                    │                    │
+   SMP / APIC          Compositor             Browser
+   VM / PMM            DevUI                  Terminal
+   Scheduler            Windows               Editor
+   Processes            Taskbar               Explorer
+   Security             Start                 Calculator
+       │                    │                    │
+       └────────────────────┼────────────────────┘
+                            │
+                         SERVICES
+                            │
+              ┌─────────────┼─────────────┐
+              │             │             │
+            Network        Storage       Audio
+              │             │             │
+           IPv4/6        VFS/NVMe       HDA
+           TCP/TLS        MyFS           ...
+           SSH
+
+Cel mai important lucru: nu aș arunca MyFS, browserul, GUI-ul sau SSH-ul pe care le ai acum. Ai deja foarte mult cod valoros. Roadmap-ul următor ar trebui să construiască infrastructură sub ele, astfel încât componentele existente să devină mai rapide, sigure și independente de hardware.
